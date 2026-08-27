@@ -1,24 +1,12 @@
 # pi-openai-long-context
 
-Toggle OpenAI GPT-5.6 models between pi's built-in **272K** context window and OpenAI's **1.05M** maximum, with one command.
+Give GPT-5.6 a **1.05M token** memory for one long task, with one command — then have it go back to normal on its own.
 
-## Why
+## The problem
 
-Pi ships GPT-5.6 Sol, Terra, and Luna with a `272000` context window so requests stay inside OpenAI's short-context pricing tier. Raising it normally means hand-editing `~/.pi/agent/models.json`:
+Pi ships GPT-5.6 Sol, Terra, and Luna with a **272K** context window. That is not a technical limit, it is a price line: OpenAI charges double for input the moment a request goes past 272K tokens. Pi keeps you under it by default.
 
-```json
-{
-  "providers": {
-    "openai": {
-      "modelOverrides": {
-        "gpt-5.6-sol": { "contextWindow": 1050000 }
-      }
-    }
-  }
-}
-```
-
-That works, but it is a per-model edit, it is easy to forget you left it on, and it is a poor fit for the common case: you want the big window for one long task, not forever.
+Sometimes you want the big window anyway — a huge file, a long refactor, a session you would rather not compact. This adds a command for exactly that, and makes sure you never leave it on by accident.
 
 ## Install
 
@@ -26,44 +14,63 @@ That works, but it is a per-model edit, it is easy to forget you left it on, and
 pi install git:github.com/johnhenaot/pi-openai-long-context
 ```
 
-Or register a local checkout in place:
+Restart pi, or run `/reload`.
 
-```bash
-pi install /Users/johnhenao/repos/personal/pi-openai-long-context
-```
+## Use it
 
-## Usage
+While you are on a GPT-5.6 model, type:
 
 ```text
 /long-context
 ```
 
-Run it while an `openai/gpt-5.6-*` model is active to raise **that model** to 1.05M. Run it again to drop back.
+Your window jumps to 1.05M and you get a warning telling you what it will cost. A `⚠` appears in the footer so you always know it is on.
 
-While it is on, the footer shows a `⚠`. Enabling it prints the same style of billing warning pi shows for Anthropic subscription auth.
+Run `/long-context` again to go back to 272K.
 
-The command is hidden from the `/` menu unless the active model is a GPT-5.6 one.
+## It turns itself off
 
-## Scope
+This is the whole point. The big window costs real money, so it is never something you can forget about:
 
-- **Only `openai/gpt-5.6-*` models.** Other providers keep their own context windows, including OpenAI-compatible routes that serve GPT models (OpenRouter, Copilot, Azure) — those have their own pricing and are deliberately left alone.
-- **Bound to one model.** Any model change resets it to the built-in window — including `sol` → `terra`. Coming back means running `/long-context` again.
-- **Survives compaction.** Auto and manual compaction keep it on; the raised window is exactly what pushes the compaction threshold out.
-- **Never persisted.** No settings are written. Every new session, and every `/reload`, starts at the built-in default.
-- **Restores the real built-in value**, so it composes with your own `models.json` overrides instead of clobbering them.
+| What you do | What happens |
+| --- | --- |
+| Switch to another model — **any** other model, even Sol → Terra | Back to 272K |
+| Start a new session | Back to 272K |
+| Restart pi, or `/reload` | Back to 272K |
+| Compact (auto or manual) | **Stays on** — the big window is what let you get this far |
 
-## Cost
+Nothing is saved to your settings. Turning it on is always a fresh, deliberate choice.
 
-Above 272K total input tokens, OpenAI bills the **entire request** at GPT-5.6 long-context rates. Pi's built-in pricing metadata already knows both tiers, so `/cost` stays accurate — but the toggle is a spending decision, not just a limit change.
+You will only see `/long-context` in the `/` menu when you are on a GPT-5.6 model, since it does nothing anywhere else.
 
-## Develop
+## What it costs
+
+Once a request goes over 272K input tokens, OpenAI bills **that entire request** at the higher rate — 2× for input and cached input, 1.5× for output. It is not just the tokens above the line.
+
+A rough sense of it, per million tokens of input:
+
+| Model | Normal | Over 272K |
+| --- | --- | --- |
+| GPT-5.6 Sol | $5 | $10 |
+| GPT-5.6 Terra | $2 | $4 |
+| GPT-5.6 Luna | $0.20 | $0.40 |
+
+`/cost` stays accurate the whole time — pi already knows both price tiers.
+
+## Only GPT-5.6, only from OpenAI
+
+Nothing else is touched. Other models keep their own context windows, and GPT models served through OpenRouter, Copilot, or Azure are left alone — they bill differently.
+
+If you already set your own context window for a GPT-5.6 model in `models.json`, turning this off restores *your* value, not pi's.
+
+## Contributing
 
 ```bash
 npm install
-npm run check   # tsc --noEmit, then node --test
+npm run check   # type check, then tests
 ```
 
-Requires Node 24+ — tests execute TypeScript directly, no build step.
+Needs Node 24+. No build step.
 
 ## License
 

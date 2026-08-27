@@ -92,7 +92,9 @@ test("the menu filter matches this command, including suffixed names", () => {
 });
 
 test("the warning names the model, the window, and the billing tier", () => {
-  const message = warningMessage(model({ provider: "openai", id: "gpt-5.6-sol" }));
+  const message = warningMessage(
+    model({ provider: "openai", id: "gpt-5.6-sol" }),
+  );
   assert.match(message, /openai\/gpt-5\.6-sol/);
   assert.match(message, /1,050,000/);
   assert.match(message, /272,000/);
