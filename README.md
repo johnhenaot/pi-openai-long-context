@@ -70,7 +70,7 @@ npm install
 npm run check   # type check, then tests
 ```
 
-Needs Node 24+. No build step.
+Needs Node 22.19+, same as pi. No build step.
 
 ## License
 
