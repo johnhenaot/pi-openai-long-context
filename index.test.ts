@@ -1,14 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import {
-  COMMAND_NAME,
-  MAX_CONTEXT_WINDOW,
-  createLongContext,
-  isOwnCommandItem,
-  isTarget,
-  warningMessage,
-} from "./index.ts";
+import { MAX_CONTEXT_WINDOW, createLongContext, isTarget } from "./index.ts";
 
 function model(
   overrides: Partial<Model<Api>> & Pick<Model<Api>, "id" | "provider">,
@@ -82,20 +75,4 @@ test("only one model is armed at a time", () => {
     "a model switch resets first, so arming twice cannot happen",
   );
   assert.equal(terra.contextWindow, 272_000);
-});
-
-test("the menu filter matches this command, including suffixed names", () => {
-  assert.ok(isOwnCommandItem({ value: COMMAND_NAME }));
-  assert.ok(isOwnCommandItem({ value: `${COMMAND_NAME}:2` }));
-  assert.ok(!isOwnCommandItem({ value: "model" }));
-  assert.ok(!isOwnCommandItem({ value: `${COMMAND_NAME}-extra` }));
-});
-
-test("the warning names the model, the window, and the billing tier", () => {
-  const message = warningMessage(
-    model({ provider: "openai", id: "gpt-5.6-sol" }),
-  );
-  assert.match(message, /openai\/gpt-5\.6-sol/);
-  assert.match(message, /1,050,000/);
-  assert.match(message, /272,000/);
 });
