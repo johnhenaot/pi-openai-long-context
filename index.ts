@@ -11,10 +11,12 @@ export const COMMAND_NAME = "long-context";
 
 const GPT_5_6_ID = /^gpt-5\.6-/;
 
+const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
+
 export function isTarget(model: Model<Api> | undefined): model is Model<Api> {
   return (
     model !== undefined &&
-    model.provider === "openai" &&
+    CAPPED_PROVIDERS.has(model.provider) &&
     GPT_5_6_ID.test(model.id)
   );
 }

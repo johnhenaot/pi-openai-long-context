@@ -28,9 +28,9 @@ Compaction is the exception: it keeps the big window, which is the point of turn
 
 Past 272K input tokens, OpenAI bills the **whole request** at its long-context rate — see [OpenAI's pricing](https://platform.openai.com/docs/pricing). On a subscription, that also burns through your quota faster.
 
-## Only GPT-5.6, only from OpenAI
+## Only GPT-5.6, only where pi caps it
 
-Other models keep their own context windows, and GPT models served through OpenRouter, Copilot, or Azure are left alone — they bill differently.
+Works on the `openai` and `openai-codex` providers — the only two that ship GPT-5.6 at 272K. Everywhere else (Azure, Copilot, OpenRouter, Bedrock, Vercel) pi already gives you the full 1.05M, so there is nothing to toggle.
 
 If you already set your own context window for a GPT-5.6 model in `models.json`, turning this off restores *your* value, not pi's.
 

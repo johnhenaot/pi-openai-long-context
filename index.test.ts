@@ -19,13 +19,14 @@ function model(
   };
 }
 
-test("only openai gpt-5.6 models are targeted", () => {
+test("only the gpt-5.6 models pi caps at 272K are targeted", () => {
   assert.ok(isTarget(model({ provider: "openai", id: "gpt-5.6-sol" })));
   assert.ok(isTarget(model({ provider: "openai", id: "gpt-5.6-terra" })));
+  assert.ok(isTarget(model({ provider: "openai-codex", id: "gpt-5.6-sol" })));
   assert.ok(!isTarget(model({ provider: "openai", id: "gpt-5.5" })));
   assert.ok(
     !isTarget(model({ provider: "openrouter", id: "gpt-5.6-sol" })),
-    "an OpenAI-compatible route is not direct OpenAI and has its own pricing",
+    "routes other than openai and openai-codex already ship 1.05M",
   );
   assert.ok(!isTarget(undefined));
 });
