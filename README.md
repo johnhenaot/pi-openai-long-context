@@ -23,10 +23,14 @@ That works, but it is a per-model edit, it is easy to forget you left it on, and
 ## Install
 
 ```bash
-pi install /Users/johnhenao/repos/personal/pi-openai-long-context
+pi install git:github.com/johnhenaot/pi-openai-long-context
 ```
 
-Local paths are registered in place, not copied. Once this is pushed to a remote, `pi install git:github.com/<user>/pi-openai-long-context` works too.
+Or register a local checkout in place:
+
+```bash
+pi install /Users/johnhenao/repos/personal/pi-openai-long-context
+```
 
 ## Usage
 
@@ -34,14 +38,18 @@ Local paths are registered in place, not copied. Once this is pushed to a remote
 /long-context
 ```
 
-Run it once to raise every `openai/gpt-5.6-*` model to 1.05M. Run it again to drop back to the built-in window.
+Run it while an `openai/gpt-5.6-*` model is active to raise **that model** to 1.05M. Run it again to drop back.
 
-The whole model catalogue is patched, so the `/model` picker and any model you switch to afterwards both reflect the current state.
+While it is on, the footer shows a `⚠`. Enabling it prints the same style of billing warning pi shows for Anthropic subscription auth.
+
+The command is hidden from the `/` menu unless the active model is a GPT-5.6 one.
 
 ## Scope
 
 - **Only `openai/gpt-5.6-*` models.** Other providers keep their own context windows, including OpenAI-compatible routes that serve GPT models (OpenRouter, Copilot, Azure) — those have their own pricing and are deliberately left alone.
-- **Session-scoped.** Every new pi session starts back at the built-in default. This is intentional: a persistent toggle you forgot about changes when compaction fires, letting sessions grow to ~1M tokens at long-context rates. Opting in per session keeps that a deliberate choice.
+- **Bound to one model.** Any model change resets it to the built-in window — including `sol` → `terra`. Coming back means running `/long-context` again.
+- **Survives compaction.** Auto and manual compaction keep it on; the raised window is exactly what pushes the compaction threshold out.
+- **Never persisted.** No settings are written. Every new session, and every `/reload`, starts at the built-in default.
 - **Restores the real built-in value**, so it composes with your own `models.json` overrides instead of clobbering them.
 
 ## Cost

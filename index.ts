@@ -1,100 +1,174 @@
 /**
- * Toggle OpenAI GPT-5.6 models between pi's built-in 272K context window
- * (OpenAI short-context pricing) and OpenAI's 1.05M maximum.
+ * Toggle the active OpenAI GPT-5.6 model between pi's built-in 272K context
+ * window and OpenAI's 1.05M maximum.
  *
- * Only `openai/gpt-5.6-*` models are touched — every other provider and model
- * keeps its own context window.
- *
- * Session-scoped by design: each new pi session starts back at the built-in
- * default, so a forgotten toggle can't silently run up long-context rates.
+ * Deliberately hard to leave on: the toggle is bound to the exact model that
+ * was active when you enabled it, and any model change — including sol to
+ * terra — puts it back. Compaction keeps it on; that is the point of raising
+ * the window in the first place.
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
   ExtensionContext,
-  SessionStartEvent,
+  ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 
 /** OpenAI's maximum GPT-5.6 context window. */
 export const MAX_CONTEXT_WINDOW = 1_050_000;
 
+export const COMMAND_NAME = "long-context";
+
+/** Input tokens above this bill the whole request at long-context rates. */
+const LONG_CONTEXT_TIER = 272_000;
+
 const GPT_5_6_ID = /^gpt-5\.6-/;
 
 export function isTarget(model: Model<Api> | undefined): model is Model<Api> {
   return (
-    model !== undefined && model.provider === "openai" && GPT_5_6_ID.test(model.id)
+    model !== undefined &&
+    model.provider === "openai" &&
+    GPT_5_6_ID.test(model.id)
   );
 }
 
-export interface ContextToggle {
-  readonly enabled: boolean;
-  apply(model: Model<Api> | undefined): boolean;
-  flip(): boolean;
+/**
+ * True for this extension's own entry in the `/` menu. pi appends `:1`, `:2`
+ * suffixes when several extensions register the same command name.
+ */
+export function isOwnCommandItem(item: { value: string }): boolean {
+  return (
+    item.value === COMMAND_NAME || item.value.startsWith(`${COMMAND_NAME}:`)
+  );
 }
 
-export function createToggle(): ContextToggle {
-  const builtIns = new Map<string, number>();
-  let enabled = false;
+export function warningMessage(model: Model<Api>): string {
+  return (
+    `Long context is active for ${model.provider}/${model.id} — ` +
+    `${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} tokens. Above ` +
+    `${LONG_CONTEXT_TIER.toLocaleString("en-US")} input tokens the entire ` +
+    `request is billed at GPT-5.6 long-context rates: 2x input and cache, ` +
+    `1.5x output. It resets to the built-in window when you switch models ` +
+    `or start a new session.`
+  );
+}
+
+export interface LongContext {
+  /** The model currently raised to the max window, if any. */
+  readonly armedModel: Model<Api> | undefined;
+  /** Raise `model` to the max window. False when it is not a GPT-5.6 model. */
+  enable(model: Model<Api> | undefined): boolean;
+  /** Restore the recorded built-in window. False when nothing was armed. */
+  reset(): boolean;
+}
+
+export function createLongContext(): LongContext {
+  let armed: { model: Model<Api>; builtIn: number } | undefined;
 
   return {
-    get enabled(): boolean {
-      return enabled;
+    get armedModel(): Model<Api> | undefined {
+      return armed?.model;
     },
 
-    flip(): boolean {
-      enabled = !enabled;
-      return enabled;
+    enable(model: Model<Api> | undefined): boolean {
+      if (armed !== undefined || !isTarget(model)) return false;
+
+      // Record the real built-in window, so a models.json contextWindow
+      // override of your own survives the toggle instead of being clobbered.
+      armed = { model, builtIn: model.contextWindow };
+      model.contextWindow = MAX_CONTEXT_WINDOW;
+      return true;
     },
 
-    apply(model: Model<Api> | undefined): boolean {
-      if (!isTarget(model)) return false;
+    reset(): boolean {
+      if (armed === undefined) return false;
 
-      // Record the real built-in window the first time this model is seen, so
-      // toggling back restores that value rather than a hardcoded default.
-      const builtIn = builtIns.get(model.id) ?? model.contextWindow;
-      builtIns.set(model.id, builtIn);
-      model.contextWindow = enabled ? MAX_CONTEXT_WINDOW : builtIn;
+      armed.model.contextWindow = armed.builtIn;
+      armed = undefined;
       return true;
     },
   };
 }
 
 export default function openaiLongContext(pi: ExtensionAPI): void {
-  const toggle = createToggle();
+  const longContext = createLongContext();
+  let hiddenFromMenu = false;
 
-  // Keep newly selected and restored models in sync with the current state.
-  pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
-    toggle.apply(ctx.model);
-  });
-  pi.on("model_select", (event) => {
-    toggle.apply(event.model);
-  });
+  const setMarker = (ui: ExtensionUIContext, on: boolean): void => {
+    ui.setStatus(COMMAND_NAME, on ? ui.theme.fg("warning", "⚠") : undefined);
+  };
 
-  pi.registerCommand("long-context", {
-    description:
-      "Toggle OpenAI GPT-5.6 context window: 272K default / 1.05M max",
-    handler: async (_args, ctx) => {
-      const enabled = toggle.flip();
+  /**
+   * Keep `/long-context` out of the `/` menu unless it would do something.
+   * pi has no way to unregister a command, so the menu is filtered instead;
+   * typing the command by hand still reaches the handler, which refuses.
+   */
+  const hideFromMenuUnlessTargeted = (ctx: ExtensionContext): void => {
+    if (hiddenFromMenu || ctx.mode !== "tui") return;
+    hiddenFromMenu = true;
 
-      // Patch the whole catalogue, not just the active model, so the /model
-      // picker and any later selection reflect the toggle too.
-      for (const model of ctx.modelRegistry.getAvailable()) toggle.apply(model);
-      toggle.apply(ctx.model);
-
-      if (!isTarget(ctx.model)) {
-        ctx.ui.notify(
-          "Active model is not an OpenAI GPT-5.6 model — the toggle is set but has no effect until you switch to one.",
-          "warning",
+    ctx.ui.addAutocompleteProvider((current) => ({
+      ...current,
+      triggerCharacters: current.triggerCharacters,
+      async getSuggestions(lines, cursorLine, cursorCol, options) {
+        const suggestions = await current.getSuggestions(
+          lines,
+          cursorLine,
+          cursorCol,
+          options,
         );
+        if (suggestions === null || isTarget(ctx.model)) return suggestions;
+
+        const items = suggestions.items.filter(
+          (item) => !isOwnCommandItem(item),
+        );
+        return items.length === 0 ? null : { ...suggestions, items };
+      },
+      applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
+        current.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+      shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
+        current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ??
+        false,
+    }));
+  };
+
+  pi.on("session_start", (_event, ctx: ExtensionContext) => {
+    hideFromMenuUnlessTargeted(ctx);
+  });
+
+  // Any model change drops back to the built-in window — including switching
+  // between two GPT-5.6 models. Compaction emits no model change, so a raised
+  // window survives it.
+  pi.on("model_select", (_event, ctx: ExtensionContext) => {
+    if (longContext.reset()) setMarker(ctx.ui, false);
+  });
+
+  // The model objects come from the shared catalogue, so a raised window would
+  // outlive this session's state on /reload.
+  pi.on("session_shutdown", (_event, ctx: ExtensionContext) => {
+    if (longContext.reset()) setMarker(ctx.ui, false);
+  });
+
+  pi.registerCommand(COMMAND_NAME, {
+    description: `Raise the GPT-5.6 context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
+    handler: async (_args, ctx) => {
+      if (longContext.reset()) {
+        setMarker(ctx.ui, false);
+        return;
       }
 
-      ctx.ui.notify(
-        enabled
-          ? `GPT-5.6 context window: ${MAX_CONTEXT_WINDOW.toLocaleString()} (long-context rates apply above 272K input tokens)`
-          : "GPT-5.6 context window: built-in default (272K, short-context rates)",
-        "info",
-      );
+      const model = ctx.model;
+      if (!isTarget(model) || !longContext.enable(model)) {
+        ctx.ui.notify(
+          `/${COMMAND_NAME} only applies to OpenAI GPT-5.6 models. Switch to one first.`,
+          "warning",
+        );
+        return;
+      }
+
+      setMarker(ctx.ui, true);
+      ctx.ui.notify(warningMessage(model), "warning");
     },
   });
 }

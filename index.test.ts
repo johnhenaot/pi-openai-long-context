@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { MAX_CONTEXT_WINDOW, createToggle, isTarget } from "./index.ts";
+import {
+  COMMAND_NAME,
+  MAX_CONTEXT_WINDOW,
+  createLongContext,
+  isOwnCommandItem,
+  isTarget,
+  warningMessage,
+} from "./index.ts";
 
 function model(
   overrides: Partial<Model<Api>> & Pick<Model<Api>, "id" | "provider">,
@@ -22,7 +29,7 @@ function model(
 test("only openai gpt-5.6 models are targeted", () => {
   assert.ok(isTarget(model({ provider: "openai", id: "gpt-5.6-sol" })));
   assert.ok(isTarget(model({ provider: "openai", id: "gpt-5.6-terra" })));
-  assert.ok(!isTarget(model({ provider: "openai", id: "gpt-4o" })));
+  assert.ok(!isTarget(model({ provider: "openai", id: "gpt-5.5" })));
   assert.ok(
     !isTarget(model({ provider: "openrouter", id: "gpt-5.6-sol" })),
     "an OpenAI-compatible route is not direct OpenAI and has its own pricing",
@@ -30,9 +37,27 @@ test("only openai gpt-5.6 models are targeted", () => {
   assert.ok(!isTarget(undefined));
 });
 
-test("toggle raises then restores the built-in window, leaving others alone", () => {
-  const toggle = createToggle();
-  const sol = model({ provider: "openai", id: "gpt-5.6-sol" });
+test("enabling raises the window, resetting restores the real built-in", () => {
+  const longContext = createLongContext();
+  // A user who already raised this model in their own models.json.
+  const sol = model({
+    provider: "openai",
+    id: "gpt-5.6-sol",
+    contextWindow: 400_000,
+  });
+
+  assert.ok(longContext.enable(sol));
+  assert.equal(sol.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(longContext.armedModel, sol);
+
+  assert.ok(longContext.reset());
+  assert.equal(sol.contextWindow, 400_000);
+  assert.equal(longContext.armedModel, undefined);
+  assert.ok(!longContext.reset(), "resetting twice is a no-op");
+});
+
+test("non-GPT-5.6 models are refused and left untouched", () => {
+  const longContext = createLongContext();
   const claude = model({
     provider: "anthropic",
     id: "claude-sonnet-4-5",
@@ -40,38 +65,35 @@ test("toggle raises then restores the built-in window, leaving others alone", ()
     contextWindow: 200_000,
   });
 
-  toggle.apply(sol);
-  assert.equal(sol.contextWindow, 272_000, "off by default");
-
-  toggle.flip();
-  toggle.apply(sol);
-  toggle.apply(claude);
-  assert.equal(sol.contextWindow, MAX_CONTEXT_WINDOW);
-  assert.equal(claude.contextWindow, 200_000, "non-openai model untouched");
-
-  toggle.flip();
-  toggle.apply(sol);
-  assert.equal(
-    sol.contextWindow,
-    272_000,
-    "restores the real built-in, not a hardcoded default",
-  );
+  assert.ok(!longContext.enable(claude));
+  assert.ok(!longContext.enable(undefined));
+  assert.equal(claude.contextWindow, 200_000);
+  assert.equal(longContext.armedModel, undefined);
 });
 
-test("a non-default built-in window survives a toggle cycle", () => {
-  const toggle = createToggle();
-  // A user who already set their own modelOverrides in models.json.
-  const custom = model({
-    provider: "openai",
-    id: "gpt-5.6-luna",
-    contextWindow: 400_000,
-  });
+test("only one model is armed at a time", () => {
+  const longContext = createLongContext();
+  const sol = model({ provider: "openai", id: "gpt-5.6-sol" });
+  const terra = model({ provider: "openai", id: "gpt-5.6-terra" });
 
-  toggle.flip();
-  toggle.apply(custom);
-  assert.equal(custom.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.ok(longContext.enable(sol));
+  assert.ok(
+    !longContext.enable(terra),
+    "a model switch resets first, so arming twice cannot happen",
+  );
+  assert.equal(terra.contextWindow, 272_000);
+});
 
-  toggle.flip();
-  toggle.apply(custom);
-  assert.equal(custom.contextWindow, 400_000);
+test("the menu filter matches this command, including suffixed names", () => {
+  assert.ok(isOwnCommandItem({ value: COMMAND_NAME }));
+  assert.ok(isOwnCommandItem({ value: `${COMMAND_NAME}:2` }));
+  assert.ok(!isOwnCommandItem({ value: "model" }));
+  assert.ok(!isOwnCommandItem({ value: `${COMMAND_NAME}-extra` }));
+});
+
+test("the warning names the model, the window, and the billing tier", () => {
+  const message = warningMessage(model({ provider: "openai", id: "gpt-5.6-sol" }));
+  assert.match(message, /openai\/gpt-5\.6-sol/);
+  assert.match(message, /1,050,000/);
+  assert.match(message, /272,000/);
 });
