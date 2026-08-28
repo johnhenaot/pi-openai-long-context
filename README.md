@@ -24,6 +24,8 @@ Switching models, starting a new session, restarting pi, `/reload` — all of it
 
 Compaction is the exception: it keeps the big window, which is the point of turning it on.
 
+If turning it off would immediately trigger automatic compaction, pi asks whether to compact or keep long context instead.
+
 ## What it costs
 
 Past 272K input tokens, OpenAI bills the **whole request** at its long-context rate — see [OpenAI's pricing](https://platform.openai.com/docs/pricing). On a subscription, that also burns through your quota faster.

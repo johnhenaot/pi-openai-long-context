@@ -50,6 +50,7 @@ export function createLongContext() {
 export default function openaiLongContext(pi: ExtensionAPI): void {
   const longContext = createLongContext();
   let hiddenFromMenu = false;
+  let warnBeforeAutoCompaction: Model<Api> | undefined;
 
   const setMarker = (ui: ExtensionUIContext, on: boolean): void => {
     ui.setStatus(COMMAND_NAME, on ? ui.theme.fg("warning", "⚠") : undefined);
@@ -87,7 +88,32 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     hideFromMenuUnlessTargeted(ctx);
   });
 
+  pi.on("before_agent_start", () => {
+    warnBeforeAutoCompaction = undefined;
+  });
+
+  pi.on("session_before_compact", async (event, ctx) => {
+    if (
+      event.reason === "manual" ||
+      ctx.model !== warnBeforeAutoCompaction ||
+      !ctx.hasUI
+    )
+      return;
+
+    const choice = await ctx.ui.select(
+      "Compaction required after turning off long context",
+      ["Compact now", "Keep long context"],
+    );
+
+    warnBeforeAutoCompaction = undefined;
+    if (choice !== "Keep long context" || !longContext.enable(ctx.model))
+      return;
+    setMarker(ctx.ui, true);
+    return { cancel: true };
+  });
+
   pi.on("model_select", (_event, ctx: ExtensionContext) => {
+    warnBeforeAutoCompaction = undefined;
     if (longContext.reset()) setMarker(ctx.ui, false);
   });
 
@@ -98,7 +124,9 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   pi.registerCommand(COMMAND_NAME, {
     description: `Raise the GPT-5.6 context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
     handler: async (_args, ctx) => {
+      const armedModel = longContext.armedModel;
       if (longContext.reset()) {
+        warnBeforeAutoCompaction = armedModel;
         setMarker(ctx.ui, false);
         return;
       }
@@ -112,6 +140,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
         return;
       }
 
+      warnBeforeAutoCompaction = undefined;
       setMarker(ctx.ui, true);
       ctx.ui.notify(
         `Long context is active for ${model.provider}/${model.id} — ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} tokens.`,
