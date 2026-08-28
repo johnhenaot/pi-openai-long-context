@@ -6,6 +6,10 @@
   "description": "Toggle OpenAI GPT-5.6 models between pi's 272K default context window and OpenAI's 1.05M maximum.",
   "license": "MIT",
   "author": "John Henao <johnhenaot@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnhenaot/pi-openai-long-context.git"
+  },
   "keywords": ["pi-package"],
   "scripts": {
     "typecheck": "tsc --noEmit",

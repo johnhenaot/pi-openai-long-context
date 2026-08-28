@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { MAX_CONTEXT_WINDOW, createLongContext, isTarget } from "./index.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import openaiLongContext, {
+  MAX_CONTEXT_WINDOW,
+  createLongContext,
+  isTarget,
+} from "./index.ts";
 
 function model(
   overrides: Partial<Model<Api>> & Pick<Model<Api>, "id" | "provider">,
@@ -76,4 +81,105 @@ test("only one model is armed at a time", () => {
     "a model switch resets first, so arming twice cannot happen",
   );
   assert.equal(terra.contextWindow, 272_000);
+});
+
+type Handler = (event: unknown, ctx: unknown) => unknown | Promise<unknown>;
+
+function extensionHarness(choice: string | undefined) {
+  const handlers = new Map<string, Handler>();
+  let commandHandler: Handler | undefined;
+  const statuses: Array<string | undefined> = [];
+  const sol = model({ provider: "openai", id: "gpt-5.6-sol" });
+  const ctx = {
+    model: sol,
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      theme: { fg: (_color: string, text: string) => text },
+      setStatus: (_name: string, value: string | undefined) =>
+        statuses.push(value),
+      notify: () => {},
+      select: async () => choice,
+    },
+  };
+
+  openaiLongContext({
+    on: (event: string, handler: Handler) => handlers.set(event, handler),
+    registerCommand: (_name: string, command: { handler: Handler }) => {
+      commandHandler = command.handler;
+    },
+  } as unknown as ExtensionAPI);
+
+  assert.ok(commandHandler);
+  return { commandHandler, ctx, handlers, sol, statuses };
+}
+
+test("keeping long context cancels compaction caused by turning it off", async () => {
+  const { commandHandler, ctx, handlers, sol, statuses } =
+    extensionHarness("Keep long context");
+
+  await commandHandler("", ctx);
+  await commandHandler("", ctx);
+  assert.equal(sol.contextWindow, 272_000);
+
+  const result = await handlers.get("session_before_compact")?.(
+    { reason: "threshold" },
+    ctx,
+  );
+
+  assert.deepEqual(result, { cancel: true });
+  assert.equal(sol.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(statuses.at(-1), "⚠");
+});
+
+test("compacting after the warning leaves long context off", async () => {
+  const { commandHandler, ctx, handlers, sol } =
+    extensionHarness("Compact now");
+
+  await commandHandler("", ctx);
+  await commandHandler("", ctx);
+
+  const result = await handlers.get("session_before_compact")?.(
+    { reason: "overflow" },
+    ctx,
+  );
+
+  assert.equal(result, undefined);
+  assert.equal(sol.contextWindow, 272_000);
+});
+
+test("later compactions proceed normally when the next turn starts safely", async () => {
+  const { commandHandler, ctx, handlers, sol } =
+    extensionHarness("Keep long context");
+
+  await commandHandler("", ctx);
+  await commandHandler("", ctx);
+  await handlers.get("before_agent_start")?.({}, ctx);
+
+  const result = await handlers.get("session_before_compact")?.(
+    { reason: "threshold" },
+    ctx,
+  );
+
+  assert.equal(result, undefined);
+  assert.equal(sol.contextWindow, 272_000);
+});
+
+test("switching models clears the pending compaction warning", async () => {
+  const { commandHandler, ctx, handlers, sol } =
+    extensionHarness("Keep long context");
+
+  await commandHandler("", ctx);
+  await commandHandler("", ctx);
+  ctx.model = model({ provider: "anthropic", id: "claude-sonnet-4-5" });
+  await handlers.get("model_select")?.({}, ctx);
+  ctx.model = sol;
+
+  const result = await handlers.get("session_before_compact")?.(
+    { reason: "threshold" },
+    ctx,
+  );
+
+  assert.equal(result, undefined);
+  assert.equal(sol.contextWindow, 272_000);
 });
