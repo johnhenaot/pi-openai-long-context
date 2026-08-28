@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-long-context",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "files": ["index.ts"],
   "description": "Toggle OpenAI GPT-5.6 models between pi's 272K default context window and OpenAI's 1.05M maximum.",
