@@ -93,18 +93,21 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
-    if (event.reason === "manual" || ctx.model !== warnBeforeAutoCompaction)
+    if (
+      event.reason === "manual" ||
+      ctx.model !== warnBeforeAutoCompaction ||
+      !ctx.hasUI
+    )
       return;
 
-    const choice = ctx.hasUI
-      ? await ctx.ui.select(
-          "Compaction required after turning off long context",
-          ["Compact now", "Keep long context"],
-        )
-      : undefined;
+    const choice = await ctx.ui.select(
+      "Compaction required after turning off long context",
+      ["Compact now", "Keep long context"],
+    );
 
     warnBeforeAutoCompaction = undefined;
-    if (choice === "Compact now" || !longContext.enable(ctx.model)) return;
+    if (choice !== "Keep long context" || !longContext.enable(ctx.model))
+      return;
     setMarker(ctx.ui, true);
     return { cancel: true };
   });
@@ -137,6 +140,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
         return;
       }
 
+      warnBeforeAutoCompaction = undefined;
       setMarker(ctx.ui, true);
       ctx.ui.notify(
         `Long context is active for ${model.provider}/${model.id} — ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} tokens.`,

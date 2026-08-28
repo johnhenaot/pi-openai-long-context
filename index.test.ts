@@ -85,21 +85,25 @@ test("only one model is armed at a time", () => {
 
 type Handler = (event: unknown, ctx: unknown) => unknown | Promise<unknown>;
 
-function extensionHarness(choice: string | undefined) {
+function extensionHarness(choice: string | undefined, hasUI = true) {
   const handlers = new Map<string, Handler>();
   let commandHandler: Handler | undefined;
+  const selections: string[] = [];
   const statuses: Array<string | undefined> = [];
   const sol = model({ provider: "openai", id: "gpt-5.6-sol" });
   const ctx = {
     model: sol,
     mode: "tui",
-    hasUI: true,
+    hasUI,
     ui: {
       theme: { fg: (_color: string, text: string) => text },
       setStatus: (_name: string, value: string | undefined) =>
         statuses.push(value),
       notify: () => {},
-      select: async () => choice,
+      select: async (title: string) => {
+        selections.push(title);
+        return choice;
+      },
     },
   };
 
@@ -111,7 +115,7 @@ function extensionHarness(choice: string | undefined) {
   } as unknown as ExtensionAPI);
 
   assert.ok(commandHandler);
-  return { commandHandler, ctx, handlers, sol, statuses };
+  return { commandHandler, ctx, handlers, selections, sol, statuses };
 }
 
 test("keeping long context cancels compaction caused by turning it off", async () => {
@@ -148,6 +152,40 @@ test("compacting after the warning leaves long context off", async () => {
   assert.equal(sol.contextWindow, 272_000);
 });
 
+test("headless mode proceeds with compaction instead of re-enabling long context", async () => {
+  const { commandHandler, ctx, handlers, selections, sol } =
+    extensionHarness("Keep long context", false);
+
+  await commandHandler("", ctx);
+  await commandHandler("", ctx);
+
+  const result = await handlers.get("session_before_compact")?.(
+    { reason: "threshold" },
+    ctx,
+  );
+
+  assert.equal(result, undefined);
+  assert.equal(sol.contextWindow, 272_000);
+  assert.deepEqual(selections, []);
+});
+
+test("dismissing the warning proceeds with compaction", async () => {
+  const { commandHandler, ctx, handlers, selections, sol } =
+    extensionHarness(undefined);
+
+  await commandHandler("", ctx);
+  await commandHandler("", ctx);
+
+  const result = await handlers.get("session_before_compact")?.(
+    { reason: "threshold" },
+    ctx,
+  );
+
+  assert.equal(result, undefined);
+  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(selections.length, 1);
+});
+
 test("later compactions proceed normally when the next turn starts safely", async () => {
   const { commandHandler, ctx, handlers, sol } =
     extensionHarness("Keep long context");
@@ -163,6 +201,24 @@ test("later compactions proceed normally when the next turn starts safely", asyn
 
   assert.equal(result, undefined);
   assert.equal(sol.contextWindow, 272_000);
+});
+
+test("re-enabling long context clears the pending compaction warning", async () => {
+  const { commandHandler, ctx, handlers, selections, sol } =
+    extensionHarness("Keep long context");
+
+  await commandHandler("", ctx);
+  await commandHandler("", ctx);
+  await commandHandler("", ctx);
+  assert.equal(sol.contextWindow, MAX_CONTEXT_WINDOW);
+
+  const result = await handlers.get("session_before_compact")?.(
+    { reason: "threshold" },
+    ctx,
+  );
+
+  assert.equal(result, undefined);
+  assert.deepEqual(selections, []);
 });
 
 test("switching models clears the pending compaction warning", async () => {
