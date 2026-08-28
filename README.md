@@ -5,7 +5,7 @@ Raise GPT-5.6 from pi's default **272K** context window to OpenAI's **1.05M** ma
 ## Install
 
 ```bash
-pi install git:github.com/johnhenaot/pi-openai-long-context
+pi install npm:pi-openai-long-context
 ```
 
 Restart pi, or run `/reload`.
