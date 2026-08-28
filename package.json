@@ -12,6 +12,7 @@
   },
   "keywords": ["pi-package"],
   "scripts": {
+    "prepublishOnly": "npm run check",
     "typecheck": "tsc --noEmit",
     "test": "node --test index.test.ts",
     "check": "npm run typecheck && npm test"
