@@ -34,7 +34,7 @@ Past 272K input tokens, OpenAI bills the **whole request** at its long-context r
 
 Works on `gpt-5.6-*` and `gpt-6-*` models on the `openai` and `openai-codex` providers. Other providers are left untouched.
 
-The toggle uses 1.05M tokens, the documented maximum for GPT-5.6 and [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra). Future `gpt-6-*` models are matched automatically; check their limits before enabling it.
+The toggle uses 1.05M tokens, the documented maximum for GPT-5.6 and [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra). Future `gpt-6-*` models are matched automatically, but this extension does not validate their limits; verify each model's documented context window before enabling it.
 
 If you already set your own context window for a supported model in `models.json`, turning this off restores *your* value, not pi's.
 
