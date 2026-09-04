@@ -1,6 +1,6 @@
 # pi-openai-long-context
 
-Raise GPT-5.6 from pi's default **272K** context window to OpenAI's **1.05M** maximum, one task at a time.
+Raise GPT-5.6 and GPT-6 models (including GPT-6 Astra) from pi's **272K** context window to **1.05M**, one task at a time.
 
 ## Install
 
@@ -16,7 +16,7 @@ Restart pi, or run `/reload`.
 /long-context
 ```
 
-Toggles the big window on and off for the GPT-5.6 model you are using. A `⚠` in the footer means it is on. The command only appears in the `/` menu on a GPT-5.6 model.
+Toggles the big window on and off for the supported model you are using. A `⚠` in the footer means it is on. The command only appears in the `/` menu for `gpt-5.6-*` and `gpt-6-*` models on `openai` or `openai-codex`.
 
 ## It turns itself off
 
@@ -30,11 +30,13 @@ If turning it off would immediately trigger automatic compaction, pi asks whethe
 
 Past 272K input tokens, OpenAI bills the **whole request** at its long-context rate — see [OpenAI's pricing](https://platform.openai.com/docs/pricing). On a subscription, that also burns through your quota faster.
 
-## Only GPT-5.6, only where pi caps it
+## Supported models and providers
 
-Works on the `openai` and `openai-codex` providers — the only two that ship GPT-5.6 at 272K. Everywhere else (Azure, Copilot, OpenRouter, Bedrock, Vercel) pi already gives you the full 1.05M, so there is nothing to toggle.
+Works on `gpt-5.6-*` and `gpt-6-*` models on the `openai` and `openai-codex` providers. Other providers are left untouched.
 
-If you already set your own context window for a GPT-5.6 model in `models.json`, turning this off restores *your* value, not pi's.
+The toggle uses 1.05M tokens, the documented maximum for GPT-5.6 and [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra). Future `gpt-6-*` models are matched automatically; check their limits before enabling it.
+
+If you already set your own context window for a supported model in `models.json`, turning this off restores *your* value, not pi's.
 
 ## License
 
