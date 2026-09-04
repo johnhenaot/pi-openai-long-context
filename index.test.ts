@@ -66,6 +66,23 @@ test("enabling raises the window, resetting restores the real built-in", () => {
   assert.ok(!longContext.reset(), "resetting twice is a no-op");
 });
 
+test("enabling never reduces an existing context window", () => {
+  for (const contextWindow of [1_050_000, 2_000_000, 4_000_000]) {
+    const longContext = createLongContext();
+    const astra = model({
+      provider: "openai-codex",
+      id: "gpt-6-astra",
+      contextWindow,
+    });
+
+    assert.ok(longContext.enable(astra));
+    assert.equal(astra.contextWindow, contextWindow);
+    assert.ok(longContext.reset());
+    assert.equal(astra.contextWindow, contextWindow);
+    assert.equal(longContext.armedModel, undefined);
+  }
+});
+
 test("unsupported models are refused and left untouched", () => {
   const longContext = createLongContext();
   const claude = model({
@@ -104,6 +121,7 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
   const autocompleteFactories: AutocompleteFactory[] = [];
   let commandHandler: Handler | undefined;
   const selections: string[] = [];
+  const notifications: string[] = [];
   const statuses: Array<string | undefined> = [];
   const sol = model({ provider: "openai", id: "gpt-5.6-sol" });
   const ctx = {
@@ -117,7 +135,7 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
       theme: { fg: (_color: string, text: string) => text },
       setStatus: (_name: string, value: string | undefined) =>
         statuses.push(value),
-      notify: () => {},
+      notify: (message: string) => notifications.push(message),
       select: async (title: string) => {
         selections.push(title);
         return choice;
@@ -138,6 +156,7 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     ctx,
     handlers,
     selections,
+    notifications,
     sol,
     statuses,
     autocompleteFactories,
@@ -175,6 +194,16 @@ test("the menu shows long context for GPT-6 and hides it for unsupported models"
     items: [items[1]],
   });
 
+  const onlyLongContext = factory({
+    ...provider,
+    getSuggestions: async () => ({ prefix: "/", items: items.slice(0, 1) }),
+  });
+  assert.equal(
+    await onlyLongContext.getSuggestions(["/"], 0, 1, options),
+    null,
+    "filtering out the only command must suppress the menu",
+  );
+
   ctx.model = model({ provider: "openai", id: "gpt-6-future-variant" });
   assert.deepEqual(await provider.getSuggestions(["/"], 0, 1, options), {
     prefix: "/",
@@ -201,6 +230,18 @@ test("GPT-6 toggles to 1.05M and restores its previous window on toggle, switch,
     assert.equal(astra.contextWindow, 400_000);
     assert.equal(statuses.at(-1), undefined);
   }
+});
+
+test("the activation notification reports the preserved larger window", async () => {
+  const { commandHandler, ctx, notifications } = extensionHarness(undefined);
+  ctx.model = model({
+    provider: "openai-codex",
+    id: "gpt-6-astra",
+    contextWindow: 4_000_000,
+  });
+
+  await commandHandler("", ctx);
+  assert.match(notifications.at(-1) ?? "", /4,000,000 tokens/);
 });
 
 test("keeping long context cancels compaction caused by turning it off", async () => {

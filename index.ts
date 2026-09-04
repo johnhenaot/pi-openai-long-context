@@ -33,7 +33,7 @@ export function createLongContext() {
       if (armed !== undefined || !isTarget(model)) return false;
 
       armed = { model, previousContextWindow: model.contextWindow };
-      model.contextWindow = MAX_CONTEXT_WINDOW;
+      model.contextWindow = Math.max(model.contextWindow, MAX_CONTEXT_WINDOW);
       return true;
     },
 
@@ -143,7 +143,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       warnBeforeAutoCompaction = undefined;
       setMarker(ctx.ui, true);
       ctx.ui.notify(
-        `Long context is active for ${model.provider}/${model.id} — ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} tokens.`,
+        `Long context is active for ${model.provider}/${model.id} — ${model.contextWindow.toLocaleString("en-US")} tokens.`,
         "warning",
       );
     },
