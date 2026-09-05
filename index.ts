@@ -9,7 +9,7 @@ export const MAX_CONTEXT_WINDOW = 1_050_000;
 
 export const COMMAND_NAME = "long-context";
 
-const GPT_5_6_ID = /^gpt-5\.6-/;
+const SUPPORTED_MODEL_ID = /^gpt-(?:5\.6|6)-/;
 
 const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
 
@@ -17,7 +17,7 @@ export function isTarget(model: Model<Api> | undefined): model is Model<Api> {
   return (
     model !== undefined &&
     CAPPED_PROVIDERS.has(model.provider) &&
-    GPT_5_6_ID.test(model.id)
+    SUPPORTED_MODEL_ID.test(model.id)
   );
 }
 
@@ -33,7 +33,7 @@ export function createLongContext() {
       if (armed !== undefined || !isTarget(model)) return false;
 
       armed = { model, previousContextWindow: model.contextWindow };
-      model.contextWindow = MAX_CONTEXT_WINDOW;
+      model.contextWindow = Math.max(model.contextWindow, MAX_CONTEXT_WINDOW);
       return true;
     },
 
@@ -122,7 +122,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand(COMMAND_NAME, {
-    description: `Raise the GPT-5.6 context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
+    description: `Raise the GPT-5.6 / GPT-6 context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
     handler: async (_args, ctx) => {
       const armedModel = longContext.armedModel;
       if (longContext.reset()) {
@@ -134,7 +134,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       const model = ctx.model;
       if (!isTarget(model) || !longContext.enable(model)) {
         ctx.ui.notify(
-          `/${COMMAND_NAME} only applies to OpenAI GPT-5.6 models. Switch to one first.`,
+          `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on openai or openai-codex. Switch to one first.`,
           "warning",
         );
         return;
@@ -143,7 +143,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       warnBeforeAutoCompaction = undefined;
       setMarker(ctx.ui, true);
       ctx.ui.notify(
-        `Long context is active for ${model.provider}/${model.id} — ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} tokens.`,
+        `Long context is active for ${model.provider}/${model.id} — ${model.contextWindow.toLocaleString("en-US")} tokens.`,
         "warning",
       );
     },
