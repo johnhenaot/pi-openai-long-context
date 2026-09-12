@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, test } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
@@ -10,6 +13,21 @@ import openaiLongContext, {
   createLongContext,
   isTarget,
 } from "./index.ts";
+
+let previousAgentDir: string | undefined;
+let testAgentDir: string;
+
+beforeEach(() => {
+  previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  testAgentDir = mkdtempSync(join(tmpdir(), "pi-long-context-test-"));
+  process.env.PI_CODING_AGENT_DIR = testAgentDir;
+});
+
+afterEach(() => {
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  rmSync(testAgentDir, { recursive: true, force: true });
+});
 
 function model(
   overrides: Partial<Model<Api>> & Pick<Model<Api>, "id" | "provider">,
@@ -123,6 +141,7 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
   const selections: string[] = [];
   const notifications: string[] = [];
   const statuses: Array<string | undefined> = [];
+  let thinkingLevel = "high";
   const sol = model({ provider: "openai", id: "gpt-5.6-sol" });
   const ctx = {
     model: sol,
@@ -148,6 +167,16 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     registerCommand: (_name: string, command: { handler: Handler }) => {
       commandHandler = command.handler;
     },
+    setModel: async (selected: Model<Api>) => {
+      ctx.model = selected;
+      // Pi reapplies the configured thinking default when setting a model.
+      thinkingLevel = "medium";
+      return true;
+    },
+    getThinkingLevel: () => thinkingLevel,
+    setThinkingLevel: (level: string) => {
+      thinkingLevel = level;
+    },
   } as unknown as ExtensionAPI);
 
   assert.ok(commandHandler);
@@ -160,8 +189,158 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     sol,
     statuses,
     autocompleteFactories,
+    getThinkingLevel: () => thinkingLevel,
   };
 }
+
+test("automatic child activation requires an explicit config opt-in", async (t) => {
+  const previous = process.env.PI_SUBAGENT_CHILD;
+  process.env.PI_SUBAGENT_CHILD = "1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous;
+  });
+  const path = join(
+    process.env.PI_CODING_AGENT_DIR!,
+    "openai-long-context.json",
+  );
+  for (const contents of [
+    undefined,
+    "{}",
+    '{"autoEnableSubagents":false}',
+    '{"autoEnableSubagents":"true"}',
+    '{"autoEnableSubagents":1}',
+    '{"autoEnableSubagents":null}',
+    "null",
+    "[]",
+    "true",
+    "{invalid",
+  ]) {
+    if (contents !== undefined) writeFileSync(path, contents);
+    const { ctx, handlers, commandHandler, sol } = extensionHarness(
+      undefined,
+      false,
+    );
+    ctx.mode = "print";
+    await handlers.get("session_start")?.({}, ctx);
+    assert.equal(
+      ctx.model.contextWindow,
+      272_000,
+      contents ?? "missing config",
+    );
+    assert.equal(ctx.model, sol, "disabled config must not reselect the model");
+    await commandHandler("", ctx);
+    assert.equal(
+      ctx.model.contextWindow,
+      1_050_000,
+      "manual toggle remains available without opting in",
+    );
+    await handlers.get("session_shutdown")?.({}, ctx);
+  }
+
+  rmSync(path);
+  mkdirSync(path); // An unreadable config path must also leave activation off.
+  const { ctx, handlers } = extensionHarness(undefined, false);
+  ctx.mode = "print";
+  await handlers.get("session_start")?.({}, ctx);
+  assert.equal(ctx.model.contextWindow, 272_000);
+});
+
+test("opted-in background children automatically arm only supported models", async (t) => {
+  writeFileSync(
+    join(process.env.PI_CODING_AGENT_DIR!, "openai-long-context.json"),
+    '{"autoEnableSubagents":true}',
+  );
+  const previous = process.env.PI_SUBAGENT_CHILD;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous;
+  });
+
+  for (const marker of [undefined, "", "0", "true", "1"]) {
+    if (marker === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = marker;
+
+    for (const [provider, id, supported] of [
+      ["openai", "gpt-5.6-sol", true],
+      ["openai-codex", "gpt-6-astra", true],
+      ["openai", "gpt-5.5", false],
+      ["openrouter", "gpt-6-astra", false],
+    ] as const) {
+      const {
+        ctx,
+        handlers,
+        selections,
+        autocompleteFactories,
+        getThinkingLevel,
+      } = extensionHarness(undefined, false);
+      ctx.mode = "print";
+      const original = model({ provider, id, contextWindow: 400_000 });
+      ctx.model = original;
+      await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+
+      const enabled = marker === "1" && supported;
+      assert.equal(
+        ctx.model.contextWindow,
+        enabled ? 1_050_000 : 400_000,
+        `${marker}: ${provider}/${id}`,
+      );
+      assert.equal(
+        original.contextWindow,
+        400_000,
+        "do not mutate the model registry shared by children",
+      );
+      assert.equal(
+        getThinkingLevel(),
+        "high",
+        "preserve the child's requested thinking level",
+      );
+      assert.deepEqual(selections, []);
+      assert.deepEqual(autocompleteFactories, []);
+      await handlers.get("session_shutdown")?.({}, ctx);
+      assert.equal(ctx.model.contextWindow, 400_000);
+    }
+  }
+});
+
+test("background children retain independent windows and the usual reset behavior", async (t) => {
+  writeFileSync(
+    join(process.env.PI_CODING_AGENT_DIR!, "openai-long-context.json"),
+    '{"autoEnableSubagents":true}',
+  );
+  const previous = process.env.PI_SUBAGENT_CHILD;
+  process.env.PI_SUBAGENT_CHILD = "1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous;
+  });
+  const first = extensionHarness(undefined, false);
+  const second = extensionHarness(undefined, false);
+  first.ctx.mode = second.ctx.mode = "print";
+  second.ctx.model = first.ctx.model;
+  await first.handlers.get("session_start")?.({}, first.ctx);
+  await second.handlers.get("session_start")?.({}, second.ctx);
+  await first.handlers.get("session_start")?.({}, first.ctx);
+  await first.handlers.get("session_before_compact")?.(
+    { reason: "threshold" },
+    first.ctx,
+  );
+  assert.equal(first.ctx.model.contextWindow, 1_050_000);
+  await first.commandHandler("", first.ctx);
+  await first.handlers.get("before_agent_start")?.({}, first.ctx);
+  assert.equal(
+    first.ctx.model.contextWindow,
+    272_000,
+    "turning it off is not undone next turn",
+  );
+  assert.equal(
+    second.ctx.model.contextWindow,
+    1_050_000,
+    "one child's reset must not reset another",
+  );
+  await second.handlers.get("model_select")?.({}, second.ctx);
+  assert.equal(second.ctx.model.contextWindow, 272_000);
+});
 
 test("the menu shows long context for GPT-6 and hides it for unsupported models", async () => {
   const { ctx, handlers, autocompleteFactories } = extensionHarness(undefined);

@@ -20,11 +20,29 @@ Toggles the big window on and off for the supported model you are using. A `⚠`
 
 ## It turns itself off
 
-Switching models, starting a new session, restarting pi, `/reload` — all of it drops you back to 272K, so you cannot leave it on and be billed for it later. Nothing is saved to your settings.
+In ordinary sessions, switching models, starting a new session, restarting pi, `/reload` — all of it drops you back to 272K, so you cannot leave it on and be billed for it later. Nothing is saved to your settings.
 
 Compaction is the exception: it keeps the big window, which is the point of turning it on.
 
 If turning it off would immediately trigger automatic compaction, pi asks whether to compact or keep long context instead.
+
+## pi-subagents
+
+Automatic long context for [pi-subagents](https://github.com/nicobailon/pi-subagents) is **off by default**. To opt in once for all future background children, create `~/.pi/agent/openai-long-context.json`:
+
+```json
+{
+  "autoEnableSubagents": true
+}
+```
+
+If you use `PI_CODING_AGENT_DIR`, put the file in that directory instead. Only the boolean `true` enables this behavior; missing, false, unreadable, or invalid config leaves it off. This extension never creates or changes the config file.
+
+After opting in, background children automatically enable long context at session startup when this extension is loaded and the selected model is supported. No per-launch flag, `/long-context` command, or `extensionBindings` is needed, and the parent's toggle is unchanged. `/long-context` remains available without opting in.
+
+Detection uses pi-subagents' `PI_SUBAGENT_CHILD=1` marker. Foreground children (`async: false`) are not automatically enabled. Background children normally discover installed extensions; if your agent restricts extension loading, include this extension's `index.ts` path in its `extensions` or `subagentOnlyExtensions` configuration. Extension-denying policies still apply.
+
+Each child keeps its own context window. Compaction preserves it; toggling off, switching models, or shutting down restores the previous value. Starting or reloading a marked child session automatically enables it again only while opted in. To opt out, set `autoEnableSubagents` to `false` or remove the file; already-running children are unaffected. The long-context costs below apply to opted-in children too.
 
 ## What it costs
 
