@@ -3,7 +3,20 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { fileURLToPath } from "node:url";
+import {
+  InMemoryCredentialStore,
+  type Api,
+  type Model,
+} from "@earendil-works/pi-ai";
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  initTheme,
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionUIContext,
@@ -246,7 +259,7 @@ test("automatic child activation requires an explicit config opt-in", async (t) 
   assert.equal(ctx.model.contextWindow, 272_000);
 });
 
-test("opted-in background children automatically arm only supported models", async (t) => {
+test("opted-in sessions in a marked runner automatically arm only supported models", async (t) => {
   writeFileSync(
     join(process.env.PI_CODING_AGENT_DIR!, "openai-long-context.json"),
     '{"autoEnableSubagents":true}',
@@ -303,7 +316,7 @@ test("opted-in background children automatically arm only supported models", asy
   }
 });
 
-test("background children retain independent windows and the usual reset behavior", async (t) => {
+test("runner child sessions retain independent windows and the usual reset behavior", async (t) => {
   writeFileSync(
     join(process.env.PI_CODING_AGENT_DIR!, "openai-long-context.json"),
     '{"autoEnableSubagents":true}',
@@ -340,6 +353,92 @@ test("background children retain independent windows and the usual reset behavio
   );
   await second.handlers.get("model_select")?.({}, second.ctx);
   assert.equal(second.ctx.model.contextWindow, 272_000);
+});
+
+test("nested foreground sessions with an explicit extension inherit the runner opt-in", async (t) => {
+  const previous = process.env.PI_SUBAGENT_CHILD;
+  process.env.PI_SUBAGENT_CHILD = "1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous;
+  });
+  writeFileSync(
+    join(testAgentDir, "openai-long-context.json"),
+    '{"autoEnableSubagents":true}',
+  );
+  const modelRuntime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsPath: null,
+    refreshOnCreate: false,
+  });
+  await modelRuntime.setRuntimeApiKey("openai", "isolated-test-key");
+  const sharedModel = modelRuntime.getModel("openai", "gpt-5.6-sol");
+  assert.ok(sharedModel);
+  initTheme("dark");
+
+  async function createChildSession() {
+    const settingsManager = SettingsManager.inMemory({
+      defaultThinkingLevel: "minimal",
+    });
+    // pi-subagents host: "parent": same process, no ambient extensions, explicit paths still load.
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: testAgentDir,
+      agentDir: testAgentDir,
+      settingsManager,
+      noExtensions: true,
+      additionalExtensionPaths: [
+        fileURLToPath(new URL("./index.ts", import.meta.url)),
+      ],
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+    await resourceLoader.reload();
+    assert.deepEqual(resourceLoader.getExtensions().errors, []);
+    const { session } = await createAgentSession({
+      cwd: testAgentDir,
+      agentDir: testAgentDir,
+      model: sharedModel,
+      thinkingLevel: "high",
+      modelRuntime,
+      resourceLoader,
+      settingsManager,
+      sessionManager: SessionManager.inMemory(testAgentDir),
+      tools: [],
+    });
+    t.after(async () => {
+      try {
+        await session.extensionRunner.emit({
+          type: "session_shutdown",
+          reason: "quit",
+        });
+      } finally {
+        session.dispose();
+      }
+    });
+    const errors: unknown[] = [];
+    await session.bindExtensions({
+      mode: "print",
+      onError: (error) => { errors.push(error); },
+    });
+    assert.deepEqual(errors, []);
+    return session;
+  }
+
+  const parent = await createChildSession();
+  const nested = await createChildSession();
+  for (const session of [parent, nested]) {
+    assert.equal(session.model?.contextWindow, 1_050_000);
+    assert.equal(session.model?.provider, "openai");
+    assert.equal(session.model?.id, "gpt-5.6-sol");
+    assert.equal(session.thinkingLevel, "high");
+  }
+  assert.equal(sharedModel.contextWindow, 272_000);
+  assert.notEqual(parent.model, nested.model);
+  await nested.prompt("/long-context");
+  assert.equal(nested.model?.contextWindow, 272_000);
+  assert.equal(parent.model?.contextWindow, 1_050_000);
 });
 
 test("the menu shows long context for GPT-6 and hides it for unsupported models", async () => {
