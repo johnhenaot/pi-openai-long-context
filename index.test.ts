@@ -351,8 +351,135 @@ test("runner child sessions retain independent windows and the usual reset behav
     1_050_000,
     "one child's reset must not reset another",
   );
+  const armed = second.ctx.model;
+  second.ctx.model = model({
+    provider: "anthropic",
+    id: "claude-sonnet-4-5",
+    contextWindow: 200_000,
+  });
   await second.handlers.get("model_select")?.({}, second.ctx);
-  assert.equal(second.ctx.model.contextWindow, 272_000);
+  assert.equal(armed.contextWindow, 272_000);
+});
+
+test("default activation requires its own explicit config opt-in", async (t) => {
+  const previous = process.env.PI_SUBAGENT_CHILD;
+  delete process.env.PI_SUBAGENT_CHILD;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous;
+  });
+  const path = join(testAgentDir, "openai-long-context.json");
+
+  for (const contents of [
+    undefined,
+    "{}",
+    '{"autoEnable":false}',
+    '{"autoEnable":"true"}',
+    '{"autoEnable":1}',
+    '{"autoEnableSubagents":true}', // children only, never the main session
+    "true",
+    "{invalid",
+  ]) {
+    if (contents !== undefined) writeFileSync(path, contents);
+    const { ctx, handlers, sol } = extensionHarness(undefined);
+    await handlers.get("session_start")?.({}, ctx);
+    assert.equal(sol.contextWindow, 272_000, contents ?? "missing config");
+    await handlers.get("model_select")?.({}, ctx);
+    assert.equal(sol.contextWindow, 272_000, contents ?? "missing config");
+    await handlers.get("session_shutdown")?.({}, ctx);
+  }
+});
+
+test("opting in by default arms at startup and follows model switches", async (t) => {
+  const previous = process.env.PI_SUBAGENT_CHILD;
+  delete process.env.PI_SUBAGENT_CHILD;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous;
+  });
+  writeFileSync(
+    join(testAgentDir, "openai-long-context.json"),
+    '{"autoEnable":true}',
+  );
+  const { commandHandler, ctx, handlers, sol, statuses } =
+    extensionHarness(undefined);
+
+  await handlers.get("session_start")?.({}, ctx);
+  assert.equal(sol.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model, sol, "the main session keeps its selected model");
+  assert.equal(statuses.at(-1), "⚠");
+
+  const claude = model({
+    provider: "anthropic",
+    id: "claude-sonnet-4-5",
+    contextWindow: 200_000,
+  });
+  ctx.model = claude;
+  await handlers.get("model_select")?.({}, ctx);
+  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(claude.contextWindow, 200_000, "unsupported models stay put");
+  assert.equal(statuses.at(-1), undefined);
+
+  ctx.model = sol;
+  await handlers.get("model_select")?.({}, ctx);
+  assert.equal(
+    sol.contextWindow,
+    MAX_CONTEXT_WINDOW,
+    "switching back to a supported model re-arms",
+  );
+
+  await commandHandler("", ctx);
+  assert.equal(sol.contextWindow, 272_000, "the manual toggle still wins");
+
+  await handlers.get("session_shutdown")?.({}, ctx);
+  assert.equal(sol.contextWindow, 272_000);
+});
+
+test("the two opt-ins are independent: each covers only its own sessions", async (t) => {
+  const previous = process.env.PI_SUBAGENT_CHILD;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous;
+  });
+  const path = join(testAgentDir, "openai-long-context.json");
+
+  for (const [contents, mainArmed, childArmed] of [
+    ['{"autoEnable":true}', true, false],
+    ['{"autoEnableSubagents":true}', false, true],
+    ['{"autoEnable":true,"autoEnableSubagents":true}', true, true],
+  ] as const) {
+    writeFileSync(path, contents);
+    for (const [child, armed] of [
+      [false, mainArmed],
+      [true, childArmed],
+    ] as const) {
+      if (child) process.env.PI_SUBAGENT_CHILD = "1";
+      else delete process.env.PI_SUBAGENT_CHILD;
+
+      const { ctx, handlers, sol, getThinkingLevel } = extensionHarness(
+        undefined,
+        false,
+      );
+      ctx.mode = "print";
+      await handlers.get("session_start")?.({}, ctx);
+
+      const label = `${contents} in a ${child ? "child" : "main"} session`;
+      assert.equal(
+        ctx.model.contextWindow,
+        armed ? MAX_CONTEXT_WINDOW : 272_000,
+        label,
+      );
+      if (child && armed) {
+        // Children clone first; the registry model they share stays at 272K.
+        assert.notEqual(ctx.model, sol, label);
+        assert.equal(sol.contextWindow, 272_000, label);
+      } else {
+        assert.equal(ctx.model, sol, label);
+      }
+      assert.equal(getThinkingLevel(), "high", label);
+      await handlers.get("session_shutdown")?.({}, ctx);
+    }
+  }
 });
 
 test("nested foreground sessions with an explicit extension inherit the runner opt-in", async (t) => {
@@ -420,7 +547,9 @@ test("nested foreground sessions with an explicit extension inherit the runner o
     const errors: unknown[] = [];
     await session.bindExtensions({
       mode: "print",
-      onError: (error) => { errors.push(error); },
+      onError: (error) => {
+        errors.push(error);
+      },
     });
     assert.deepEqual(errors, []);
     return session;

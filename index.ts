@@ -54,6 +54,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   const longContext = createLongContext();
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
+  let optedIn = false;
+  let arming = false;
 
   const setMarker = (ui: ExtensionUIContext, on: boolean): void => {
     ui.setStatus(COMMAND_NAME, on ? ui.theme.fg("warning", "⚠") : undefined);
@@ -87,30 +89,44 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     }));
   };
 
+  const autoArm = async (ctx: ExtensionContext): Promise<void> => {
+    // pi.setModel below cannot re-enter this, but a loop here would hang a session.
+    if (arming || !optedIn || longContext.armedModel || !isTarget(ctx.model))
+      return;
+    arming = true;
+    try {
+      let model = ctx.model;
+      if (process.env.PI_SUBAGENT_CHILD === "1") {
+        // Background children share a model registry; only mutate this session's copy.
+        model = { ...ctx.model };
+        const thinkingLevel = pi.getThinkingLevel();
+        if (!(await pi.setModel(model))) return;
+        pi.setThinkingLevel(thinkingLevel);
+      }
+      if (longContext.enable(model)) setMarker(ctx.ui, true);
+    } finally {
+      arming = false;
+    }
+  };
+
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     hideFromMenuUnlessTargeted(ctx);
-    if (
-      process.env.PI_SUBAGENT_CHILD !== "1" ||
-      !isTarget(ctx.model) ||
-      longContext.armedModel
-    )
-      return;
 
     try {
       const config = JSON.parse(
         await readFile(join(getAgentDir(), "openai-long-context.json"), "utf8"),
       );
-      if (config?.autoEnableSubagents !== true) return;
+      optedIn =
+        config?.[
+          process.env.PI_SUBAGENT_CHILD === "1"
+            ? "autoEnableSubagents"
+            : "autoEnable"
+        ] === true;
     } catch {
-      return;
+      optedIn = false;
     }
 
-    // Background children share a model registry; only mutate this session's copy.
-    const model = { ...ctx.model };
-    const thinkingLevel = pi.getThinkingLevel();
-    if (!(await pi.setModel(model))) return;
-    pi.setThinkingLevel(thinkingLevel);
-    if (longContext.enable(model)) setMarker(ctx.ui, true);
+    await autoArm(ctx);
   });
 
   pi.on("before_agent_start", () => {
@@ -137,9 +153,10 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     return { cancel: true };
   });
 
-  pi.on("model_select", (_event, ctx: ExtensionContext) => {
+  pi.on("model_select", async (_event, ctx: ExtensionContext) => {
     warnBeforeAutoCompaction = undefined;
     if (longContext.reset()) setMarker(ctx.ui, false);
+    await autoArm(ctx);
   });
 
   pi.on("session_shutdown", (_event, ctx: ExtensionContext) => {
