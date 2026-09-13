@@ -1,4 +1,7 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -84,8 +87,30 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     }));
   };
 
-  pi.on("session_start", (_event, ctx: ExtensionContext) => {
+  pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     hideFromMenuUnlessTargeted(ctx);
+    if (
+      process.env.PI_SUBAGENT_CHILD !== "1" ||
+      !isTarget(ctx.model) ||
+      longContext.armedModel
+    )
+      return;
+
+    try {
+      const config = JSON.parse(
+        await readFile(join(getAgentDir(), "openai-long-context.json"), "utf8"),
+      );
+      if (config?.autoEnableSubagents !== true) return;
+    } catch {
+      return;
+    }
+
+    // Background children share a model registry; only mutate this session's copy.
+    const model = { ...ctx.model };
+    const thinkingLevel = pi.getThinkingLevel();
+    if (!(await pi.setModel(model))) return;
+    pi.setThinkingLevel(thinkingLevel);
+    if (longContext.enable(model)) setMarker(ctx.ui, true);
   });
 
   pi.on("before_agent_start", () => {
