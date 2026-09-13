@@ -95,14 +95,12 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       return;
     arming = true;
     try {
-      let model = ctx.model;
-      if (process.env.PI_SUBAGENT_CHILD === "1") {
-        // Background children share a model registry; only mutate this session's copy.
-        model = { ...ctx.model };
-        const thinkingLevel = pi.getThinkingLevel();
-        if (!(await pi.setModel(model))) return;
-        pi.setThinkingLevel(thinkingLevel);
-      }
+      // Sessions in one process share a model registry, and a subagent child can
+      // be one of them; only ever mutate this session's own copy.
+      const model = { ...ctx.model };
+      const thinkingLevel = pi.getThinkingLevel();
+      if (!(await pi.setModel(model))) return;
+      pi.setThinkingLevel(thinkingLevel);
       if (longContext.enable(model)) setMarker(ctx.ui, true);
     } finally {
       arming = false;

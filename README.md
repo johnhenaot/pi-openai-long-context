@@ -40,7 +40,7 @@ Use one, the other, or both — they are independent. Only the literal `true` co
 
 Opted-in sessions turn long context on at startup and again whenever you switch to a supported model. `/long-context` still wins for the model you are on, until the next model switch or session.
 
-To opt out, flip the flag to `false` or delete the file. Sessions already running keep what they have.
+To opt out, flip the flag to `false` or delete the file. Sessions already running read the file only at startup, so they keep auto-arming until they end.
 
 ## It turns itself off
 
@@ -66,7 +66,7 @@ Which children this reaches, and what to do when it misses one.
 
 Nothing per launch is needed: no flag, no `/long-context`, no `extensionBindings`. An opted-in child raises its window at startup if the extension is loaded and its model is supported.
 
-`autoEnableSubagents` keys off `PI_SUBAGENT_CHILD=1`, which marks the **runner process**, not one child's execution mode. So it also covers nested foreground children (`async: false`) running in that process. Foreground children outside a runner stay manual.
+`autoEnableSubagents` keys off `PI_SUBAGENT_CHILD=1`, which marks the **runner process**, not one child's execution mode. So it also covers nested foreground children (`async: false`) running in that process. A foreground child started directly inside your own pi process has no marker, so it follows `autoEnable` like your session does.
 
 Background children discover installed extensions on their own; foreground children need an explicit path. If a child does not pick this up, add this extension's `index.ts` to the agent's `extensions` or `subagentOnlyExtensions`. Extension-denying policies still apply.
 

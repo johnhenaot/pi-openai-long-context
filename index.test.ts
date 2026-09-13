@@ -184,6 +184,9 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
       ctx.model = selected;
       // Pi reapplies the configured thinking default when setting a model.
       thinkingLevel = "medium";
+      // Pi skips model_select for a same-id clone; fire it anyway so the
+      // re-entrancy guard is exercised rather than trusted.
+      await handlers.get("model_select")?.({ model: selected }, ctx);
       return true;
     },
     getThinkingLevel: () => thinkingLevel,
@@ -405,9 +408,11 @@ test("opting in by default arms at startup and follows model switches", async (t
     extensionHarness(undefined);
 
   await handlers.get("session_start")?.({}, ctx);
-  assert.equal(sol.contextWindow, MAX_CONTEXT_WINDOW);
-  assert.equal(ctx.model, sol, "the main session keeps its selected model");
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.notEqual(ctx.model, sol, "arm a private copy, not the registry");
+  assert.equal(sol.contextWindow, 272_000);
   assert.equal(statuses.at(-1), "⚠");
+  const armedSol = ctx.model;
 
   const claude = model({
     provider: "anthropic",
@@ -416,23 +421,34 @@ test("opting in by default arms at startup and follows model switches", async (t
   });
   ctx.model = claude;
   await handlers.get("model_select")?.({}, ctx);
-  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(armedSol.contextWindow, 272_000);
   assert.equal(claude.contextWindow, 200_000, "unsupported models stay put");
+  assert.equal(ctx.model, claude);
   assert.equal(statuses.at(-1), undefined);
 
   ctx.model = sol;
   await handlers.get("model_select")?.({}, ctx);
   assert.equal(
-    sol.contextWindow,
+    ctx.model.contextWindow,
     MAX_CONTEXT_WINDOW,
     "switching back to a supported model re-arms",
   );
+  assert.equal(sol.contextWindow, 272_000);
+
+  const terra = model({ provider: "openai", id: "gpt-5.6-terra" });
+  const armedAgain = ctx.model;
+  ctx.model = terra;
+  await handlers.get("model_select")?.({}, ctx);
+  assert.equal(armedAgain.contextWindow, 272_000, "release the old copy");
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.notEqual(ctx.model, terra, "a fresh copy per supported model");
+  assert.equal(terra.contextWindow, 272_000);
 
   await commandHandler("", ctx);
-  assert.equal(sol.contextWindow, 272_000, "the manual toggle still wins");
+  assert.equal(ctx.model.contextWindow, 272_000, "the manual toggle still wins");
 
   await handlers.get("session_shutdown")?.({}, ctx);
-  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(ctx.model.contextWindow, 272_000);
 });
 
 test("the two opt-ins are independent: each covers only its own sessions", async (t) => {
@@ -469,13 +485,9 @@ test("the two opt-ins are independent: each covers only its own sessions", async
         armed ? MAX_CONTEXT_WINDOW : 272_000,
         label,
       );
-      if (child && armed) {
-        // Children clone first; the registry model they share stays at 272K.
-        assert.notEqual(ctx.model, sol, label);
-        assert.equal(sol.contextWindow, 272_000, label);
-      } else {
-        assert.equal(ctx.model, sol, label);
-      }
+      // Arming always clones; the registry model sessions share stays at 272K.
+      assert.equal(ctx.model !== sol, armed, label);
+      assert.equal(sol.contextWindow, 272_000, label);
       assert.equal(getThinkingLevel(), "high", label);
       await handlers.get("session_shutdown")?.({}, ctx);
     }
