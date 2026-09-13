@@ -445,7 +445,11 @@ test("opting in by default arms at startup and follows model switches", async (t
   assert.equal(terra.contextWindow, 272_000);
 
   await commandHandler("", ctx);
-  assert.equal(ctx.model.contextWindow, 272_000, "the manual toggle still wins");
+  assert.equal(
+    ctx.model.contextWindow,
+    272_000,
+    "the manual toggle still wins",
+  );
 
   await handlers.get("session_shutdown")?.({}, ctx);
   assert.equal(ctx.model.contextWindow, 272_000);
