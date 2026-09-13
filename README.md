@@ -38,7 +38,7 @@ Create `~/.pi/agent/openai-long-context.json` (or the same file in your `PI_CODI
 
 Use one, the other, or both — they are independent. Only the literal `true` counts; anything else (missing file, `false`, `"true"`, broken JSON) leaves that side off. pi never writes this file for you.
 
-Opted-in sessions turn long context on at startup and again whenever you switch to a supported model. `/long-context` still wins for the model you are on, until the next model switch or session.
+Opted-in sessions turn long context on at startup and again whenever you pick a supported model. `/long-context` still wins for the model you are on, until the next model switch or session.
 
 To opt out, flip the flag to `false` or delete the file. Sessions already running read the file only at startup, so they keep auto-arming until they end.
 

@@ -90,6 +90,12 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   };
 
   const autoArm = async (ctx: ExtensionContext): Promise<void> => {
+    // Re-selecting the current model swaps in the registry object without a
+    // model_select event; release our orphaned copy before re-arming.
+    if (longContext.armedModel && longContext.armedModel !== ctx.model) {
+      longContext.reset();
+      setMarker(ctx.ui, false);
+    }
     // pi.setModel below cannot re-enter this, but a loop here would hang a session.
     if (arming || !optedIn || longContext.armedModel || !isTarget(ctx.model))
       return;
@@ -127,8 +133,11 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     await autoArm(ctx);
   });
 
-  pi.on("before_agent_start", () => {
+  pi.on("before_agent_start", async (_event, ctx: ExtensionContext) => {
     warnBeforeAutoCompaction = undefined;
+    // Only heal an orphaned copy here; turning it off by hand must stay off.
+    if (longContext.armedModel && longContext.armedModel !== ctx.model)
+      await autoArm(ctx);
   });
 
   pi.on("session_before_compact", async (event, ctx) => {

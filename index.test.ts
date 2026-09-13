@@ -385,10 +385,14 @@ test("default activation requires its own explicit config opt-in", async (t) => 
   ]) {
     if (contents !== undefined) writeFileSync(path, contents);
     const { ctx, handlers, sol } = extensionHarness(undefined);
+    const label = contents ?? "missing config";
     await handlers.get("session_start")?.({}, ctx);
-    assert.equal(sol.contextWindow, 272_000, contents ?? "missing config");
+    // Arming clones, so an unarmed session must still hold the original.
+    assert.equal(ctx.model, sol, label);
+    assert.equal(sol.contextWindow, 272_000, label);
     await handlers.get("model_select")?.({}, ctx);
-    assert.equal(sol.contextWindow, 272_000, contents ?? "missing config");
+    assert.equal(ctx.model, sol, label);
+    assert.equal(sol.contextWindow, 272_000, label);
     await handlers.get("session_shutdown")?.({}, ctx);
   }
 });
@@ -453,6 +457,42 @@ test("opting in by default arms at startup and follows model switches", async (t
 
   await handlers.get("session_shutdown")?.({}, ctx);
   assert.equal(ctx.model.contextWindow, 272_000);
+});
+
+test("re-selecting the current model re-arms instead of orphaning the copy", async (t) => {
+  const previous = process.env.PI_SUBAGENT_CHILD;
+  delete process.env.PI_SUBAGENT_CHILD;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous;
+  });
+  writeFileSync(
+    join(testAgentDir, "openai-long-context.json"),
+    '{"autoEnable":true}',
+  );
+  const { commandHandler, ctx, handlers, sol, statuses } =
+    extensionHarness(undefined);
+
+  await handlers.get("session_start")?.({}, ctx);
+  const orphaned = ctx.model;
+  assert.equal(orphaned.contextWindow, MAX_CONTEXT_WINDOW);
+
+  // Pi swaps the registry model back in without a model_select event when the
+  // newly selected model has the id it already had.
+  ctx.model = sol;
+  await handlers.get("before_agent_start")?.({}, ctx);
+
+  assert.equal(orphaned.contextWindow, 272_000, "release the orphaned copy");
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.notEqual(ctx.model, sol);
+  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(statuses.at(-1), "⚠");
+
+  // Turning it off by hand must survive the next turn.
+  await commandHandler("", ctx);
+  await handlers.get("before_agent_start")?.({}, ctx);
+  assert.equal(ctx.model.contextWindow, 272_000);
+  assert.equal(statuses.at(-1), undefined);
 });
 
 test("the two opt-ins are independent: each covers only its own sessions", async (t) => {
