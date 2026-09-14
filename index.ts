@@ -12,6 +12,12 @@ export const MAX_CONTEXT_WINDOW = 1_050_000;
 
 export const COMMAND_NAME = "long-context";
 
+const CONFIG_FILE = "openai-long-context.json";
+
+const SUBAGENT_RUNNER_MARKER = "PI_SUBAGENT_CHILD";
+
+const KEEP_LONG_CONTEXT = "Keep long context";
+
 const SUPPORTED_MODEL_ID = /^gpt-(?:5\.6|6)-/;
 
 const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
@@ -50,12 +56,28 @@ export function createLongContext() {
   };
 }
 
+function isSubagentRunnerProcess(): boolean {
+  return process.env[SUBAGENT_RUNNER_MARKER] === "1";
+}
+
+async function readAutoEnableSetting(): Promise<boolean> {
+  const key = isSubagentRunnerProcess() ? "autoEnableSubagents" : "autoEnable";
+  try {
+    const config = JSON.parse(
+      await readFile(join(getAgentDir(), CONFIG_FILE), "utf8"),
+    );
+    return config?.[key] === true;
+  } catch {
+    return false;
+  }
+}
+
 export default function openaiLongContext(pi: ExtensionAPI): void {
   const longContext = createLongContext();
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
-  let optedIn = false;
-  let arming = false;
+  let autoEnabled = false;
+  let raisingWindow = false;
 
   const setMarker = (ui: ExtensionUIContext, on: boolean): void => {
     ui.setStatus(COMMAND_NAME, on ? ui.theme.fg("warning", "⚠") : undefined);
@@ -89,113 +111,104 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     }));
   };
 
-  const autoArm = async (ctx: ExtensionContext): Promise<void> => {
-    // Re-selecting the current model swaps in the registry object without a
-    // model_select event; release our orphaned copy before re-arming.
-    if (longContext.armedModel && longContext.armedModel !== ctx.model) {
-      longContext.reset();
-      setMarker(ctx.ui, false);
-    }
-    // pi.setModel below cannot re-enter this, but a loop here would hang a session.
-    if (arming || !optedIn || longContext.armedModel || !isTarget(ctx.model))
-      return;
-    arming = true;
+  const releaseRaisedWindow = (ctx: ExtensionContext): boolean => {
+    if (!longContext.reset()) return false;
+    setMarker(ctx.ui, false);
+    return true;
+  };
+
+  const raiseWindowOnPrivateCopy = async (
+    ctx: ExtensionContext,
+  ): Promise<Model<Api> | undefined> => {
+    if (raisingWindow || !isTarget(ctx.model)) return undefined;
+
+    raisingWindow = true;
     try {
-      // Sessions in one process share a model registry, and a subagent child can
-      // be one of them; only ever mutate this session's own copy.
-      const model = { ...ctx.model };
-      const thinkingLevel = pi.getThinkingLevel();
-      if (!(await pi.setModel(model))) return;
-      pi.setThinkingLevel(thinkingLevel);
-      if (longContext.enable(model)) setMarker(ctx.ui, true);
+      const privateCopy = { ...ctx.model };
+      const requestedThinkingLevel = pi.getThinkingLevel();
+      if (!(await pi.setModel(privateCopy))) return undefined;
+      pi.setThinkingLevel(requestedThinkingLevel);
+      if (!longContext.enable(privateCopy)) return undefined;
+      setMarker(ctx.ui, true);
+      return privateCopy;
     } finally {
-      arming = false;
+      raisingWindow = false;
     }
   };
 
-  // Re-selecting the model that is already selected swaps pi's registry object
-  // back in without a model_select event, orphaning the copy we raised.
-  const healOrphanedCopy = async (ctx: ExtensionContext): Promise<void> => {
-    if (longContext.armedModel && longContext.armedModel !== ctx.model)
-      await autoArm(ctx);
+  const raisedCopyDetachedFromSession = (ctx: ExtensionContext): boolean =>
+    longContext.armedModel !== undefined &&
+    longContext.armedModel !== ctx.model;
+
+  const reattachRaisedWindow = async (
+    ctx: ExtensionContext,
+  ): Promise<boolean> => {
+    if (!raisedCopyDetachedFromSession(ctx)) return false;
+    releaseRaisedWindow(ctx);
+    return (await raiseWindowOnPrivateCopy(ctx)) !== undefined;
   };
+
+  const raiseWindowWhenAutoEnabled = async (
+    ctx: ExtensionContext,
+  ): Promise<void> => {
+    if (!autoEnabled || longContext.armedModel) return;
+    await raiseWindowOnPrivateCopy(ctx);
+  };
+
+  const startsNewTurn = (event: { streamingBehavior?: unknown }): boolean =>
+    event.streamingBehavior === undefined;
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     hideFromMenuUnlessTargeted(ctx);
-
-    try {
-      const config = JSON.parse(
-        await readFile(join(getAgentDir(), "openai-long-context.json"), "utf8"),
-      );
-      optedIn =
-        config?.[
-          process.env.PI_SUBAGENT_CHILD === "1"
-            ? "autoEnableSubagents"
-            : "autoEnable"
-        ] === true;
-    } catch {
-      optedIn = false;
-    }
-
-    await autoArm(ctx);
+    autoEnabled = await readAutoEnableSetting();
+    await raiseWindowWhenAutoEnabled(ctx);
   });
 
-  // Unlike before_agent_start, this runs before pi decides whether to compact,
-  // which is the decision an orphaned copy would silently get wrong.
   pi.on("input", async (event, ctx: ExtensionContext) => {
-    // Mid-stream messages skip that check anyway, and swapping the model out
-    // from under a running turn helps nobody.
-    if (event.streamingBehavior === undefined) await healOrphanedCopy(ctx);
+    if (startsNewTurn(event)) await reattachRaisedWindow(ctx);
   });
 
   pi.on("before_agent_start", async (_event, ctx: ExtensionContext) => {
     warnBeforeAutoCompaction = undefined;
-    // Only heal here; turning it off by hand must stay off.
-    await healOrphanedCopy(ctx);
+    await reattachRaisedWindow(ctx);
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
-    if (
-      event.reason === "manual" ||
-      ctx.model !== warnBeforeAutoCompaction ||
-      !ctx.hasUI
-    )
-      return;
+    if (event.reason === "manual") return;
+    if (await reattachRaisedWindow(ctx)) return { cancel: true };
+    if (ctx.model !== warnBeforeAutoCompaction || !ctx.hasUI) return;
 
     const choice = await ctx.ui.select(
       "Compaction required after turning off long context",
-      ["Compact now", "Keep long context"],
+      ["Compact now", KEEP_LONG_CONTEXT],
     );
 
     warnBeforeAutoCompaction = undefined;
-    if (choice !== "Keep long context" || !longContext.enable(ctx.model))
-      return;
-    setMarker(ctx.ui, true);
+    if (choice !== KEEP_LONG_CONTEXT) return;
+    if (!(await raiseWindowOnPrivateCopy(ctx))) return;
     return { cancel: true };
   });
 
   pi.on("model_select", async (_event, ctx: ExtensionContext) => {
     warnBeforeAutoCompaction = undefined;
-    if (longContext.reset()) setMarker(ctx.ui, false);
-    await autoArm(ctx);
+    releaseRaisedWindow(ctx);
+    await raiseWindowWhenAutoEnabled(ctx);
   });
 
   pi.on("session_shutdown", (_event, ctx: ExtensionContext) => {
-    if (longContext.reset()) setMarker(ctx.ui, false);
+    releaseRaisedWindow(ctx);
   });
 
   pi.registerCommand(COMMAND_NAME, {
     description: `Raise the GPT-5.6 / GPT-6 context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
     handler: async (_args, ctx) => {
-      const armedModel = longContext.armedModel;
-      if (longContext.reset()) {
-        warnBeforeAutoCompaction = armedModel;
-        setMarker(ctx.ui, false);
+      if (releaseRaisedWindow(ctx)) {
+        warnBeforeAutoCompaction = ctx.model;
         return;
       }
 
-      const model = ctx.model;
-      if (!isTarget(model) || !longContext.enable(model)) {
+      const raised = await raiseWindowOnPrivateCopy(ctx);
+      if (raised === undefined) {
         ctx.ui.notify(
           `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on openai or openai-codex. Switch to one first.`,
           "warning",
@@ -204,9 +217,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       }
 
       warnBeforeAutoCompaction = undefined;
-      setMarker(ctx.ui, true);
       ctx.ui.notify(
-        `Long context is active for ${model.provider}/${model.id} — ${model.contextWindow.toLocaleString("en-US")} tokens.`,
+        `Long context is active for ${raised.provider}/${raised.id} — ${raised.contextWindow.toLocaleString("en-US")} tokens.`,
         "warning",
       );
     },

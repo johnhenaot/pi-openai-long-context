@@ -36,7 +36,6 @@ beforeEach(() => {
   previousChildMarker = process.env.PI_SUBAGENT_CHILD;
   testAgentDir = mkdtempSync(join(tmpdir(), "pi-long-context-test-"));
   process.env.PI_CODING_AGENT_DIR = testAgentDir;
-  // Tests that care set this themselves; the rest run as a main session.
   delete process.env.PI_SUBAGENT_CHILD;
 });
 
@@ -86,19 +85,21 @@ test("only GPT-5.6 and GPT-6 models on capped providers are targeted", () => {
 
 test("enabling raises the window, resetting restores the real built-in", () => {
   const longContext = createLongContext();
-  // A user who already raised this model in their own models.json.
-  const sol = model({
+  const alreadyRaisedInUserModelsJson = model({
     provider: "openai",
     id: "gpt-5.6-sol",
     contextWindow: 400_000,
   });
 
-  assert.ok(longContext.enable(sol));
-  assert.equal(sol.contextWindow, MAX_CONTEXT_WINDOW);
-  assert.equal(longContext.armedModel, sol);
+  assert.ok(longContext.enable(alreadyRaisedInUserModelsJson));
+  assert.equal(
+    alreadyRaisedInUserModelsJson.contextWindow,
+    MAX_CONTEXT_WINDOW,
+  );
+  assert.equal(longContext.armedModel, alreadyRaisedInUserModelsJson);
 
   assert.ok(longContext.reset());
-  assert.equal(sol.contextWindow, 400_000);
+  assert.equal(alreadyRaisedInUserModelsJson.contextWindow, 400_000);
   assert.equal(longContext.armedModel, undefined);
   assert.ok(!longContext.reset(), "resetting twice is a no-op");
 });
@@ -148,6 +149,10 @@ test("only one model is armed at a time", () => {
   assert.equal(terra.contextWindow, 272_000);
 });
 
+const THINKING_LEVEL_PI_APPLIES_ON_MODEL_CHANGE = "medium";
+
+const REQUESTED_THINKING_LEVEL = "high";
+
 type Handler = (event: unknown, ctx: unknown) => unknown | Promise<unknown>;
 type AutocompleteFactory = Parameters<
   ExtensionUIContext["addAutocompleteProvider"]
@@ -160,10 +165,10 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
   const selections: string[] = [];
   const notifications: string[] = [];
   const statuses: Array<string | undefined> = [];
-  let thinkingLevel = "high";
-  const sol = model({ provider: "openai", id: "gpt-5.6-sol" });
+  let thinkingLevel = REQUESTED_THINKING_LEVEL;
+  const registryModel = model({ provider: "openai", id: "gpt-5.6-sol" });
   const ctx = {
-    model: sol,
+    model: registryModel,
     mode: "tui",
     hasUI,
     ui: {
@@ -181,6 +186,12 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     },
   };
 
+  const emitModelSelectEvenThoughPiSkipsItForSameIdModels = async (
+    selected: Model<Api>,
+  ): Promise<void> => {
+    await handlers.get("model_select")?.({ model: selected }, ctx);
+  };
+
   openaiLongContext({
     on: (event: string, handler: Handler) => handlers.set(event, handler),
     registerCommand: (_name: string, command: { handler: Handler }) => {
@@ -188,11 +199,8 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     },
     setModel: async (selected: Model<Api>) => {
       ctx.model = selected;
-      // Pi reapplies the configured thinking default when setting a model.
-      thinkingLevel = "medium";
-      // Pi skips model_select for a same-id clone; fire it anyway so the
-      // re-entrancy guard is exercised rather than trusted.
-      await handlers.get("model_select")?.({ model: selected }, ctx);
+      thinkingLevel = THINKING_LEVEL_PI_APPLIES_ON_MODEL_CHANGE;
+      await emitModelSelectEvenThoughPiSkipsItForSameIdModels(selected);
       return true;
     },
     getThinkingLevel: () => thinkingLevel,
@@ -208,7 +216,7 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     handlers,
     selections,
     notifications,
-    sol,
+    registryModel,
     statuses,
     autocompleteFactories,
     getThinkingLevel: () => thinkingLevel,
@@ -234,7 +242,7 @@ test("automatic child activation requires an explicit config opt-in", async () =
     "{invalid",
   ]) {
     if (contents !== undefined) writeFileSync(path, contents);
-    const { ctx, handlers, commandHandler, sol } = extensionHarness(
+    const { ctx, handlers, commandHandler, registryModel } = extensionHarness(
       undefined,
       false,
     );
@@ -245,7 +253,7 @@ test("automatic child activation requires an explicit config opt-in", async () =
       272_000,
       contents ?? "missing config",
     );
-    assert.equal(ctx.model, sol, "disabled config must not reselect the model");
+    assert.equal(ctx.model, registryModel, "disabled config must not reselect the model");
     await commandHandler("", ctx);
     assert.equal(
       ctx.model.contextWindow,
@@ -256,7 +264,7 @@ test("automatic child activation requires an explicit config opt-in", async () =
   }
 
   rmSync(path);
-  mkdirSync(path); // An unreadable config path must also leave activation off.
+  mkdirSync(path);
   const { ctx, handlers } = extensionHarness(undefined, false);
   ctx.mode = "print";
   await handlers.get("session_start")?.({}, ctx);
@@ -304,7 +312,7 @@ test("opted-in sessions in a marked runner automatically arm only supported mode
       );
       assert.equal(
         getThinkingLevel(),
-        "high",
+        REQUESTED_THINKING_LEVEL,
         "preserve the child's requested thinking level",
       );
       assert.deepEqual(selections, []);
@@ -364,20 +372,19 @@ test("default activation requires its own explicit config opt-in", async () => {
     '{"autoEnable":false}',
     '{"autoEnable":"true"}',
     '{"autoEnable":1}',
-    '{"autoEnableSubagents":true}', // children only, never the main session
+    '{"autoEnableSubagents":true}',
     "true",
     "{invalid",
   ]) {
     if (contents !== undefined) writeFileSync(path, contents);
-    const { ctx, handlers, sol } = extensionHarness(undefined);
+    const { ctx, handlers, registryModel } = extensionHarness(undefined);
     const label = contents ?? "missing config";
     await handlers.get("session_start")?.({}, ctx);
-    // Arming clones, so an unarmed session must still hold the original.
-    assert.equal(ctx.model, sol, label);
-    assert.equal(sol.contextWindow, 272_000, label);
+    assert.equal(ctx.model, registryModel, label);
+    assert.equal(registryModel.contextWindow, 272_000, label);
     await handlers.get("model_select")?.({}, ctx);
-    assert.equal(ctx.model, sol, label);
-    assert.equal(sol.contextWindow, 272_000, label);
+    assert.equal(ctx.model, registryModel, label);
+    assert.equal(registryModel.contextWindow, 272_000, label);
     await handlers.get("session_shutdown")?.({}, ctx);
   }
 });
@@ -387,13 +394,13 @@ test("opting in by default arms at startup and follows model switches", async ()
     join(testAgentDir, "openai-long-context.json"),
     '{"autoEnable":true}',
   );
-  const { commandHandler, ctx, handlers, sol, statuses } =
+  const { commandHandler, ctx, handlers, registryModel, statuses } =
     extensionHarness(undefined);
 
   await handlers.get("session_start")?.({}, ctx);
   assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
-  assert.notEqual(ctx.model, sol, "arm a private copy, not the registry");
-  assert.equal(sol.contextWindow, 272_000);
+  assert.notEqual(ctx.model, registryModel, "arm a private copy, not the registry");
+  assert.equal(registryModel.contextWindow, 272_000);
   assert.equal(statuses.at(-1), "⚠");
   const armedSol = ctx.model;
 
@@ -409,14 +416,14 @@ test("opting in by default arms at startup and follows model switches", async ()
   assert.equal(ctx.model, claude);
   assert.equal(statuses.at(-1), undefined);
 
-  ctx.model = sol;
+  ctx.model = registryModel;
   await handlers.get("model_select")?.({}, ctx);
   assert.equal(
     ctx.model.contextWindow,
     MAX_CONTEXT_WINDOW,
     "switching back to a supported model re-arms",
   );
-  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(registryModel.contextWindow, 272_000);
 
   const terra = model({ provider: "openai", id: "gpt-5.6-terra" });
   const armedAgain = ctx.model;
@@ -443,46 +450,82 @@ test("re-selecting the current model re-arms instead of orphaning the copy", asy
     join(testAgentDir, "openai-long-context.json"),
     '{"autoEnable":true}',
   );
-  const { commandHandler, ctx, handlers, sol, statuses } =
+  const { commandHandler, ctx, handlers, registryModel, statuses } =
     extensionHarness(undefined);
 
   await handlers.get("session_start")?.({}, ctx);
   const orphaned = ctx.model;
   assert.equal(orphaned.contextWindow, MAX_CONTEXT_WINDOW);
 
-  // Pi swaps the registry model back in without a model_select event when the
-  // newly selected model has the id it already had.
-  ctx.model = sol;
-  // Mid-stream input must leave the running turn alone.
+  ctx.model = registryModel;
   await handlers.get("input")?.({ streamingBehavior: "steer" }, ctx);
-  assert.equal(orphaned.contextWindow, MAX_CONTEXT_WINDOW);
-  assert.equal(ctx.model, sol);
+  assert.equal(
+    orphaned.contextWindow,
+    MAX_CONTEXT_WINDOW,
+    "mid-stream input leaves the running turn alone",
+  );
+  assert.equal(ctx.model, registryModel);
 
-  // Pi checks whether to compact after input and before before_agent_start, so
-  // the copy has to be healed by then or the turn compacts against 272K.
   await handlers.get("input")?.({}, ctx);
 
   assert.equal(orphaned.contextWindow, 272_000, "release the orphaned copy");
   assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
-  assert.notEqual(ctx.model, sol);
-  assert.equal(sol.contextWindow, 272_000);
+  assert.notEqual(ctx.model, registryModel);
+  assert.equal(registryModel.contextWindow, 272_000);
   assert.equal(statuses.at(-1), "⚠");
 
-  // Turning it off by hand must survive the next turn.
   await commandHandler("", ctx);
   await handlers.get("input")?.({}, ctx);
   await handlers.get("before_agent_start")?.({}, ctx);
-  assert.equal(ctx.model.contextWindow, 272_000);
+  assert.equal(
+    ctx.model.contextWindow,
+    272_000,
+    "turning it off by hand survives the next turn",
+  );
   assert.equal(statuses.at(-1), undefined);
 
-  // before_agent_start still heals turns that do not come from input.
   const healed = ctx.model;
   await handlers.get("model_select")?.({}, ctx);
   assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
   ctx.model = healed;
   await handlers.get("before_agent_start")?.({}, ctx);
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(
+    ctx.model.contextWindow,
+    MAX_CONTEXT_WINDOW,
+    "before_agent_start repairs turns that do not come from input",
+  );
   assert.notEqual(ctx.model, healed);
+});
+
+test("an automatic compaction repairs a detached copy and is cancelled", async () => {
+  writeFileSync(
+    join(testAgentDir, "openai-long-context.json"),
+    '{"autoEnable":true}',
+  );
+  const { ctx, handlers, registryModel, statuses } =
+    extensionHarness(undefined);
+
+  await handlers.get("session_start")?.({}, ctx);
+  const detached = ctx.model;
+  ctx.model = registryModel;
+
+  const manual = await handlers.get("session_before_compact")?.(
+    { reason: "manual" },
+    ctx,
+  );
+  assert.equal(manual, undefined, "manual compaction is never intercepted");
+  assert.equal(ctx.model, registryModel);
+
+  const automatic = await handlers.get("session_before_compact")?.(
+    { reason: "threshold" },
+    ctx,
+  );
+
+  assert.deepEqual(automatic, { cancel: true });
+  assert.equal(detached.contextWindow, 272_000);
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(registryModel.contextWindow, 272_000);
+  assert.equal(statuses.at(-1), "⚠");
 });
 
 test("the two opt-ins are independent: each covers only its own sessions", async () => {
@@ -501,7 +544,7 @@ test("the two opt-ins are independent: each covers only its own sessions", async
       if (child) process.env.PI_SUBAGENT_CHILD = "1";
       else delete process.env.PI_SUBAGENT_CHILD;
 
-      const { ctx, handlers, sol, getThinkingLevel } = extensionHarness(
+      const { ctx, handlers, registryModel, getThinkingLevel } = extensionHarness(
         undefined,
         false,
       );
@@ -514,9 +557,8 @@ test("the two opt-ins are independent: each covers only its own sessions", async
         armed ? MAX_CONTEXT_WINDOW : 272_000,
         label,
       );
-      // Arming always clones; the registry model sessions share stays at 272K.
-      assert.equal(ctx.model !== sol, armed, label);
-      assert.equal(sol.contextWindow, 272_000, label);
+      assert.equal(ctx.model !== registryModel, armed, label);
+      assert.equal(registryModel.contextWindow, 272_000, label);
       assert.equal(getThinkingLevel(), "high", label);
       await handlers.get("session_shutdown")?.({}, ctx);
     }
@@ -539,12 +581,10 @@ test("nested foreground sessions with an explicit extension inherit the runner o
   assert.ok(sharedModel);
   initTheme("dark");
 
-  async function createChildSession() {
-    const settingsManager = SettingsManager.inMemory({
-      defaultThinkingLevel: "minimal",
-    });
-    // pi-subagents host: "parent": same process, no ambient extensions, explicit paths still load.
-    const resourceLoader = new DefaultResourceLoader({
+  function loadThisExtensionTheWayASubagentHostDoes(
+    settingsManager: SettingsManager,
+  ) {
+    return new DefaultResourceLoader({
       cwd: testAgentDir,
       agentDir: testAgentDir,
       settingsManager,
@@ -557,6 +597,14 @@ test("nested foreground sessions with an explicit extension inherit the runner o
       noThemes: true,
       noContextFiles: true,
     });
+  }
+
+  async function createChildSession() {
+    const settingsManager = SettingsManager.inMemory({
+      defaultThinkingLevel: "minimal",
+    });
+    const resourceLoader =
+      loadThisExtensionTheWayASubagentHostDoes(settingsManager);
     await resourceLoader.reload();
     assert.deepEqual(resourceLoader.getExtensions().errors, []);
     const { session } = await createAgentSession({
@@ -666,13 +714,29 @@ test("GPT-6 toggles to 1.05M and restores its previous window on toggle, switch,
 
   for (const event of [undefined, "model_select", "session_shutdown"]) {
     await commandHandler("", ctx);
-    assert.equal(astra.contextWindow, 1_050_000);
+    const raised = ctx.model;
+    assert.equal(raised.contextWindow, 1_050_000);
     assert.equal(statuses.at(-1), "⚠");
     if (event) await handlers.get(event)?.({}, ctx);
     else await commandHandler("", ctx);
+    assert.equal(raised.contextWindow, 400_000);
     assert.equal(astra.contextWindow, 400_000);
     assert.equal(statuses.at(-1), undefined);
   }
+});
+
+test("the manual toggle raises a private copy, never the model other sessions share", async () => {
+  const { commandHandler, ctx, registryModel } = extensionHarness(undefined);
+
+  await commandHandler("", ctx);
+  const raised = ctx.model;
+  assert.notEqual(raised, registryModel);
+  assert.equal(raised.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(registryModel.contextWindow, 272_000);
+
+  await commandHandler("", ctx);
+  assert.equal(raised.contextWindow, 272_000);
+  assert.equal(registryModel.contextWindow, 272_000);
 });
 
 test("the activation notification reports the preserved larger window", async () => {
@@ -688,12 +752,12 @@ test("the activation notification reports the preserved larger window", async ()
 });
 
 test("keeping long context cancels compaction caused by turning it off", async () => {
-  const { commandHandler, ctx, handlers, sol, statuses } =
+  const { commandHandler, ctx, handlers, registryModel, statuses } =
     extensionHarness("Keep long context");
 
   await commandHandler("", ctx);
   await commandHandler("", ctx);
-  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(ctx.model.contextWindow, 272_000);
 
   const result = await handlers.get("session_before_compact")?.(
     { reason: "threshold" },
@@ -701,12 +765,13 @@ test("keeping long context cancels compaction caused by turning it off", async (
   );
 
   assert.deepEqual(result, { cancel: true });
-  assert.equal(sol.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(registryModel.contextWindow, 272_000);
   assert.equal(statuses.at(-1), "⚠");
 });
 
 test("compacting after the warning leaves long context off", async () => {
-  const { commandHandler, ctx, handlers, sol } =
+  const { commandHandler, ctx, handlers, registryModel } =
     extensionHarness("Compact now");
 
   await commandHandler("", ctx);
@@ -718,11 +783,12 @@ test("compacting after the warning leaves long context off", async () => {
   );
 
   assert.equal(result, undefined);
-  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(ctx.model.contextWindow, 272_000);
+  assert.equal(registryModel.contextWindow, 272_000);
 });
 
 test("headless mode proceeds with compaction instead of re-enabling long context", async () => {
-  const { commandHandler, ctx, handlers, selections, sol } = extensionHarness(
+  const { commandHandler, ctx, handlers, selections } = extensionHarness(
     "Keep long context",
     false,
   );
@@ -736,12 +802,12 @@ test("headless mode proceeds with compaction instead of re-enabling long context
   );
 
   assert.equal(result, undefined);
-  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(ctx.model.contextWindow, 272_000);
   assert.deepEqual(selections, []);
 });
 
 test("dismissing the warning proceeds with compaction", async () => {
-  const { commandHandler, ctx, handlers, selections, sol } =
+  const { commandHandler, ctx, handlers, selections } =
     extensionHarness(undefined);
 
   await commandHandler("", ctx);
@@ -753,12 +819,12 @@ test("dismissing the warning proceeds with compaction", async () => {
   );
 
   assert.equal(result, undefined);
-  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(ctx.model.contextWindow, 272_000);
   assert.equal(selections.length, 1);
 });
 
 test("later compactions proceed normally when the next turn starts safely", async () => {
-  const { commandHandler, ctx, handlers, sol } =
+  const { commandHandler, ctx, handlers } =
     extensionHarness("Keep long context");
 
   await commandHandler("", ctx);
@@ -771,17 +837,17 @@ test("later compactions proceed normally when the next turn starts safely", asyn
   );
 
   assert.equal(result, undefined);
-  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(ctx.model.contextWindow, 272_000);
 });
 
 test("re-enabling long context clears the pending compaction warning", async () => {
-  const { commandHandler, ctx, handlers, selections, sol } =
+  const { commandHandler, ctx, handlers, selections } =
     extensionHarness("Keep long context");
 
   await commandHandler("", ctx);
   await commandHandler("", ctx);
   await commandHandler("", ctx);
-  assert.equal(sol.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
 
   const result = await handlers.get("session_before_compact")?.(
     { reason: "threshold" },
@@ -793,14 +859,14 @@ test("re-enabling long context clears the pending compaction warning", async () 
 });
 
 test("switching models clears the pending compaction warning", async () => {
-  const { commandHandler, ctx, handlers, sol } =
+  const { commandHandler, ctx, handlers, registryModel } =
     extensionHarness("Keep long context");
 
   await commandHandler("", ctx);
   await commandHandler("", ctx);
   ctx.model = model({ provider: "anthropic", id: "claude-sonnet-4-5" });
   await handlers.get("model_select")?.({}, ctx);
-  ctx.model = sol;
+  ctx.model = registryModel;
 
   const result = await handlers.get("session_before_compact")?.(
     { reason: "threshold" },
@@ -808,5 +874,5 @@ test("switching models clears the pending compaction warning", async () => {
   );
 
   assert.equal(result, undefined);
-  assert.equal(sol.contextWindow, 272_000);
+  assert.equal(registryModel.contextWindow, 272_000);
 });
