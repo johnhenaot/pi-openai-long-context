@@ -189,6 +189,16 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
 		await handlers.get("model_select")?.({ model: selected }, ctx);
 	};
 
+	let switchModelWhilePiIsSettingOne: (() => Promise<void>) | undefined;
+
+	const userSwitchesTo = (chosen: Model<Api>): void => {
+		switchModelWhilePiIsSettingOne = async () => {
+			switchModelWhilePiIsSettingOne = undefined;
+			ctx.model = chosen;
+			await handlers.get("model_select")?.({ model: chosen }, ctx);
+		};
+	};
+
 	openaiLongContext({
 		on: (event: string, handler: Handler) => handlers.set(event, handler),
 		registerCommand: (_name: string, command: { handler: Handler }) => {
@@ -198,6 +208,7 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
 			ctx.model = selected;
 			thinkingLevel = THINKING_LEVEL_PI_APPLIES_ON_MODEL_CHANGE;
 			await emitModelSelectEvenThoughPiSkipsItForSameIdModels(selected);
+			await switchModelWhilePiIsSettingOne?.();
 			return true;
 		},
 		getThinkingLevel: () => thinkingLevel,
@@ -216,6 +227,7 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
 		registryModel,
 		statuses,
 		autocompleteFactories,
+		userSwitchesTo,
 		getThinkingLevel: () => thinkingLevel,
 	};
 }
@@ -499,6 +511,49 @@ test("re-selecting the current model re-arms instead of orphaning the copy", asy
 	assert.notEqual(ctx.model, healed);
 });
 
+test("a model switch during the raise wins, and that model is armed instead", async () => {
+	writeFileSync(
+		join(testAgentDir, "openai-long-context.json"),
+		'{"autoEnable":true}',
+	);
+	const { ctx, handlers, registryModel, statuses, userSwitchesTo } =
+		extensionHarness(undefined);
+	const claude = model({
+		provider: "anthropic",
+		id: "claude-sonnet-4-5",
+		contextWindow: 200_000,
+	});
+
+	userSwitchesTo(claude);
+	await handlers.get("session_start")?.({}, ctx);
+
+	assert.equal(ctx.model, claude, "the model the user picked stays selected");
+	assert.equal(claude.contextWindow, 200_000);
+	assert.equal(registryModel.contextWindow, 272_000);
+	assert.equal(statuses.at(-1), undefined);
+
+	await handlers.get("before_agent_start")?.({}, ctx);
+	assert.equal(ctx.model, claude, "nothing reattaches a copy that never armed");
+
+	const terra = model({ provider: "openai", id: "gpt-5.6-terra" });
+	const switchedToTerra = extensionHarness(undefined);
+	switchedToTerra.userSwitchesTo(terra);
+
+	await switchedToTerra.handlers.get("session_start")?.(
+		{},
+		switchedToTerra.ctx,
+	);
+
+	assert.equal(switchedToTerra.ctx.model.id, "gpt-5.6-terra");
+	assert.notEqual(
+		switchedToTerra.ctx.model,
+		terra,
+		"the switched-to model is armed on a copy",
+	);
+	assert.equal(switchedToTerra.ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+	assert.equal(terra.contextWindow, 272_000);
+});
+
 test("an automatic compaction repairs a detached copy and is cancelled", async () => {
 	writeFileSync(
 		join(testAgentDir, "openai-long-context.json"),
@@ -528,6 +583,47 @@ test("an automatic compaction repairs a detached copy and is cancelled", async (
 	assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
 	assert.equal(registryModel.contextWindow, 272_000);
 	assert.equal(statuses.at(-1), "⚠");
+});
+
+test("an overflow compaction that continues a turn is repaired but never cancelled", async () => {
+	writeFileSync(
+		join(testAgentDir, "openai-long-context.json"),
+		'{"autoEnable":true}',
+	);
+	const { ctx, handlers, registryModel } = extensionHarness(undefined);
+
+	await handlers.get("session_start")?.({}, ctx);
+	const detached = ctx.model;
+	ctx.model = registryModel;
+
+	const result = await handlers.get("session_before_compact")?.(
+		{ reason: "overflow", willRetry: true },
+		ctx,
+	);
+
+	assert.equal(result, undefined, "cancelling would drop the interrupted turn");
+	assert.equal(detached.contextWindow, 272_000);
+	assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+	assert.equal(registryModel.contextWindow, 272_000);
+});
+
+test("an overflow compaction with no retry is cancelled like any other", async () => {
+	writeFileSync(
+		join(testAgentDir, "openai-long-context.json"),
+		'{"autoEnable":true}',
+	);
+	const { ctx, handlers, registryModel } = extensionHarness(undefined);
+
+	await handlers.get("session_start")?.({}, ctx);
+	ctx.model = registryModel;
+
+	const result = await handlers.get("session_before_compact")?.(
+		{ reason: "overflow", willRetry: false },
+		ctx,
+	);
+
+	assert.deepEqual(result, { cancel: true });
+	assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
 });
 
 test("the two opt-ins are independent: each covers only its own sessions", async () => {

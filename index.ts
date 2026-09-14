@@ -78,6 +78,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
 	let warnBeforeAutoCompaction: Model<Api> | undefined;
 	let autoEnabled = false;
 	let raisingWindow = false;
+	let modelBeingRaised: Model<Api> | undefined;
+	let modelChosenWhileRaising: Model<Api> | undefined;
 
 	const setMarker = (ui: ExtensionUIContext, on: boolean): void => {
 		ui.setStatus(COMMAND_NAME, on ? ui.theme.fg("warning", "⚠") : undefined);
@@ -117,23 +119,36 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
 		return true;
 	};
 
-	const raiseWindowOnPrivateCopy = async (
+	const armPrivateCopy = async (
 		ctx: ExtensionContext,
-	): Promise<Model<Api> | undefined> => {
-		if (raisingWindow || !isTarget(ctx.model)) return undefined;
+	): Promise<{ raised?: Model<Api>; interruptedBy?: Model<Api> }> => {
+		if (raisingWindow || !isTarget(ctx.model)) return {};
 
 		raisingWindow = true;
 		try {
 			const privateCopy = { ...ctx.model };
+			modelBeingRaised = privateCopy;
 			const requestedThinkingLevel = pi.getThinkingLevel();
-			if (!(await pi.setModel(privateCopy))) return undefined;
+			if (!(await pi.setModel(privateCopy))) return {};
+			if (modelChosenWhileRaising !== undefined)
+				return { interruptedBy: modelChosenWhileRaising };
 			pi.setThinkingLevel(requestedThinkingLevel);
-			if (!longContext.enable(privateCopy)) return undefined;
+			if (!longContext.enable(privateCopy)) return {};
 			setMarker(ctx.ui, true);
-			return privateCopy;
+			return { raised: privateCopy };
 		} finally {
 			raisingWindow = false;
+			modelBeingRaised = undefined;
+			modelChosenWhileRaising = undefined;
 		}
+	};
+
+	const raiseWindowOnPrivateCopy = async (
+		ctx: ExtensionContext,
+	): Promise<Model<Api> | undefined> => {
+		const { raised, interruptedBy } = await armPrivateCopy(ctx);
+		if (interruptedBy !== undefined) await pi.setModel(interruptedBy);
+		return raised;
 	};
 
 	const raisedCopyDetachedFromSession = (ctx: ExtensionContext): boolean =>
@@ -173,9 +188,17 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
 		await reattachRaisedWindow(ctx);
 	});
 
+	const compactionContinuesAnInterruptedTurn = (event: {
+		reason: string;
+		willRetry?: boolean;
+	}): boolean => event.reason === "overflow" && event.willRetry === true;
+
 	pi.on("session_before_compact", async (event, ctx) => {
 		if (event.reason === "manual") return;
-		if (await reattachRaisedWindow(ctx)) return { cancel: true };
+		if (await reattachRaisedWindow(ctx))
+			return compactionContinuesAnInterruptedTurn(event)
+				? undefined
+				: { cancel: true };
 		if (ctx.model !== warnBeforeAutoCompaction || !ctx.hasUI) return;
 
 		const choice = await ctx.ui.select(
@@ -191,6 +214,10 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
 
 	pi.on("model_select", async (_event, ctx: ExtensionContext) => {
 		warnBeforeAutoCompaction = undefined;
+		if (raisingWindow) {
+			if (ctx.model !== modelBeingRaised) modelChosenWhileRaising = ctx.model;
+			return;
+		}
 		releaseRaisedWindow(ctx);
 		await raiseWindowWhenAutoEnabled(ctx);
 	});
