@@ -1,8 +1,10 @@
 {
   "name": "pi-openai-long-context",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
-  "files": ["index.ts"],
+  "files": [
+    "index.ts"
+  ],
   "description": "Toggle OpenAI GPT-5.6 and GPT-6 models between pi's 272K context window and 1.05M tokens.",
   "license": "MIT",
   "author": "John Henao <johnhenaot@gmail.com>",
@@ -10,12 +12,16 @@
     "type": "git",
     "url": "git+https://github.com/johnhenaot/pi-openai-long-context.git"
   },
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "scripts": {
     "prepublishOnly": "npm run check",
+    "format": "biome check --write .",
+    "lint": "biome ci .",
     "typecheck": "tsc --noEmit",
     "test": "node --test index.test.ts",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run lint && npm run typecheck && npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -30,6 +36,7 @@
     }
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.13",
     "@earendil-works/pi-ai": "0.84.3",
     "@earendil-works/pi-coding-agent": "0.84.3",
     "@types/node": "22.19.19",
@@ -39,6 +46,8 @@
     "node": ">=22.19.0"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }
