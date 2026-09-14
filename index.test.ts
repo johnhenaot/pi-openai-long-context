@@ -76,6 +76,16 @@ test("only GPT-5.6 and GPT-6 models on capped providers are targeted", () => {
     "routes other than openai and openai-codex already ship 1.05M",
   );
   assert.ok(!isTarget(undefined));
+  assert.ok(
+    isTarget(model({ provider: "openrouter", id: "gpt-6-astra" }), [
+      "openrouter",
+    ]),
+  );
+  assert.ok(
+    !isTarget(model({ provider: "anthropic", id: "gpt-6-astra" }), [
+      "openrouter",
+    ]),
+  );
 });
 
 test("enabling raises the window, resetting restores the real built-in", () => {
@@ -257,6 +267,43 @@ test("automatic child activation requires an explicit config opt-in", async (t) 
   ctx.mode = "print";
   await handlers.get("session_start")?.({}, ctx);
   assert.equal(ctx.model.contextWindow, 272_000);
+});
+
+test("additional providers require explicit configuration", async () => {
+  writeFileSync(
+    join(testAgentDir, "openai-long-context.json"),
+    '{"additionalProviders":["openrouter"]}',
+  );
+  const { ctx, handlers, commandHandler, autocompleteFactories } =
+    extensionHarness(undefined);
+  ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commandHandler("", ctx);
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+
+  const factory = autocompleteFactories[0];
+  assert.ok(factory);
+  const provider = factory({
+    getSuggestions: async () => ({
+      prefix: "/",
+      items: [{ value: "long-context", label: "long-context" }],
+    }),
+    applyCompletion: (lines, cursorLine, cursorCol) => ({
+      lines,
+      cursorLine,
+      cursorCol,
+    }),
+  });
+  assert.deepEqual(
+    await provider.getSuggestions(
+      ["/"],
+      0,
+      1,
+      { signal: new AbortController().signal },
+    ),
+    { prefix: "/", items: [{ value: "long-context", label: "long-context" }] },
+  );
 });
 
 test("opted-in sessions in a marked runner automatically arm only supported models", async (t) => {
