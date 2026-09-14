@@ -40,7 +40,7 @@ Use one, the other, or both — they are independent. Only the literal `true` co
 
 Opted-in sessions turn long context on at startup and again whenever you pick a supported model. `/long-context` still wins for the model you are on, until the next model switch or session.
 
-To opt out, flip the flag to `false` or delete the file. Sessions already running read the file only at startup, so they keep auto-arming until they end.
+To opt out, flip the flag to `false` or delete the file. The file is read when a session starts, so a running session keeps auto-arming until you `/reload` it (or start, resume, or fork one).
 
 ## It turns itself off
 

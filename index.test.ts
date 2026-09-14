@@ -28,17 +28,23 @@ import openaiLongContext, {
 } from "./index.ts";
 
 let previousAgentDir: string | undefined;
+let previousChildMarker: string | undefined;
 let testAgentDir: string;
 
 beforeEach(() => {
   previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  previousChildMarker = process.env.PI_SUBAGENT_CHILD;
   testAgentDir = mkdtempSync(join(tmpdir(), "pi-long-context-test-"));
   process.env.PI_CODING_AGENT_DIR = testAgentDir;
+  // Tests that care set this themselves; the rest run as a main session.
+  delete process.env.PI_SUBAGENT_CHILD;
 });
 
 afterEach(() => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  if (previousChildMarker === undefined) delete process.env.PI_SUBAGENT_CHILD;
+  else process.env.PI_SUBAGENT_CHILD = previousChildMarker;
   rmSync(testAgentDir, { recursive: true, force: true });
 });
 
@@ -209,13 +215,8 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
   };
 }
 
-test("automatic child activation requires an explicit config opt-in", async (t) => {
-  const previous = process.env.PI_SUBAGENT_CHILD;
+test("automatic child activation requires an explicit config opt-in", async () => {
   process.env.PI_SUBAGENT_CHILD = "1";
-  t.after(() => {
-    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
-    else process.env.PI_SUBAGENT_CHILD = previous;
-  });
   const path = join(
     process.env.PI_CODING_AGENT_DIR!,
     "openai-long-context.json",
@@ -262,16 +263,11 @@ test("automatic child activation requires an explicit config opt-in", async (t) 
   assert.equal(ctx.model.contextWindow, 272_000);
 });
 
-test("opted-in sessions in a marked runner automatically arm only supported models", async (t) => {
+test("opted-in sessions in a marked runner automatically arm only supported models", async () => {
   writeFileSync(
     join(process.env.PI_CODING_AGENT_DIR!, "openai-long-context.json"),
     '{"autoEnableSubagents":true}',
   );
-  const previous = process.env.PI_SUBAGENT_CHILD;
-  t.after(() => {
-    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
-    else process.env.PI_SUBAGENT_CHILD = previous;
-  });
 
   for (const marker of [undefined, "", "0", "true", "1"]) {
     if (marker === undefined) delete process.env.PI_SUBAGENT_CHILD;
@@ -319,17 +315,12 @@ test("opted-in sessions in a marked runner automatically arm only supported mode
   }
 });
 
-test("runner child sessions retain independent windows and the usual reset behavior", async (t) => {
+test("runner child sessions retain independent windows and the usual reset behavior", async () => {
   writeFileSync(
     join(process.env.PI_CODING_AGENT_DIR!, "openai-long-context.json"),
     '{"autoEnableSubagents":true}',
   );
-  const previous = process.env.PI_SUBAGENT_CHILD;
   process.env.PI_SUBAGENT_CHILD = "1";
-  t.after(() => {
-    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
-    else process.env.PI_SUBAGENT_CHILD = previous;
-  });
   const first = extensionHarness(undefined, false);
   const second = extensionHarness(undefined, false);
   first.ctx.mode = second.ctx.mode = "print";
@@ -364,13 +355,7 @@ test("runner child sessions retain independent windows and the usual reset behav
   assert.equal(armed.contextWindow, 272_000);
 });
 
-test("default activation requires its own explicit config opt-in", async (t) => {
-  const previous = process.env.PI_SUBAGENT_CHILD;
-  delete process.env.PI_SUBAGENT_CHILD;
-  t.after(() => {
-    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
-    else process.env.PI_SUBAGENT_CHILD = previous;
-  });
+test("default activation requires its own explicit config opt-in", async () => {
   const path = join(testAgentDir, "openai-long-context.json");
 
   for (const contents of [
@@ -397,13 +382,7 @@ test("default activation requires its own explicit config opt-in", async (t) => 
   }
 });
 
-test("opting in by default arms at startup and follows model switches", async (t) => {
-  const previous = process.env.PI_SUBAGENT_CHILD;
-  delete process.env.PI_SUBAGENT_CHILD;
-  t.after(() => {
-    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
-    else process.env.PI_SUBAGENT_CHILD = previous;
-  });
+test("opting in by default arms at startup and follows model switches", async () => {
   writeFileSync(
     join(testAgentDir, "openai-long-context.json"),
     '{"autoEnable":true}',
@@ -459,13 +438,7 @@ test("opting in by default arms at startup and follows model switches", async (t
   assert.equal(ctx.model.contextWindow, 272_000);
 });
 
-test("re-selecting the current model re-arms instead of orphaning the copy", async (t) => {
-  const previous = process.env.PI_SUBAGENT_CHILD;
-  delete process.env.PI_SUBAGENT_CHILD;
-  t.after(() => {
-    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
-    else process.env.PI_SUBAGENT_CHILD = previous;
-  });
+test("re-selecting the current model re-arms instead of orphaning the copy", async () => {
   writeFileSync(
     join(testAgentDir, "openai-long-context.json"),
     '{"autoEnable":true}',
@@ -480,7 +453,14 @@ test("re-selecting the current model re-arms instead of orphaning the copy", asy
   // Pi swaps the registry model back in without a model_select event when the
   // newly selected model has the id it already had.
   ctx.model = sol;
-  await handlers.get("before_agent_start")?.({}, ctx);
+  // Mid-stream input must leave the running turn alone.
+  await handlers.get("input")?.({ streamingBehavior: "steer" }, ctx);
+  assert.equal(orphaned.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model, sol);
+
+  // Pi checks whether to compact after input and before before_agent_start, so
+  // the copy has to be healed by then or the turn compacts against 272K.
+  await handlers.get("input")?.({}, ctx);
 
   assert.equal(orphaned.contextWindow, 272_000, "release the orphaned copy");
   assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
@@ -490,17 +470,22 @@ test("re-selecting the current model re-arms instead of orphaning the copy", asy
 
   // Turning it off by hand must survive the next turn.
   await commandHandler("", ctx);
+  await handlers.get("input")?.({}, ctx);
   await handlers.get("before_agent_start")?.({}, ctx);
   assert.equal(ctx.model.contextWindow, 272_000);
   assert.equal(statuses.at(-1), undefined);
+
+  // before_agent_start still heals turns that do not come from input.
+  const healed = ctx.model;
+  await handlers.get("model_select")?.({}, ctx);
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  ctx.model = healed;
+  await handlers.get("before_agent_start")?.({}, ctx);
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.notEqual(ctx.model, healed);
 });
 
-test("the two opt-ins are independent: each covers only its own sessions", async (t) => {
-  const previous = process.env.PI_SUBAGENT_CHILD;
-  t.after(() => {
-    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
-    else process.env.PI_SUBAGENT_CHILD = previous;
-  });
+test("the two opt-ins are independent: each covers only its own sessions", async () => {
   const path = join(testAgentDir, "openai-long-context.json");
 
   for (const [contents, mainArmed, childArmed] of [
@@ -539,12 +524,7 @@ test("the two opt-ins are independent: each covers only its own sessions", async
 });
 
 test("nested foreground sessions with an explicit extension inherit the runner opt-in", async (t) => {
-  const previous = process.env.PI_SUBAGENT_CHILD;
   process.env.PI_SUBAGENT_CHILD = "1";
-  t.after(() => {
-    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
-    else process.env.PI_SUBAGENT_CHILD = previous;
-  });
   writeFileSync(
     join(testAgentDir, "openai-long-context.json"),
     '{"autoEnableSubagents":true}',

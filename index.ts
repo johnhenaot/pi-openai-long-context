@@ -113,6 +113,13 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     }
   };
 
+  // Re-selecting the model that is already selected swaps pi's registry object
+  // back in without a model_select event, orphaning the copy we raised.
+  const healOrphanedCopy = async (ctx: ExtensionContext): Promise<void> => {
+    if (longContext.armedModel && longContext.armedModel !== ctx.model)
+      await autoArm(ctx);
+  };
+
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     hideFromMenuUnlessTargeted(ctx);
 
@@ -133,11 +140,18 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     await autoArm(ctx);
   });
 
+  // Unlike before_agent_start, this runs before pi decides whether to compact,
+  // which is the decision an orphaned copy would silently get wrong.
+  pi.on("input", async (event, ctx: ExtensionContext) => {
+    // Mid-stream messages skip that check anyway, and swapping the model out
+    // from under a running turn helps nobody.
+    if (event.streamingBehavior === undefined) await healOrphanedCopy(ctx);
+  });
+
   pi.on("before_agent_start", async (_event, ctx: ExtensionContext) => {
     warnBeforeAutoCompaction = undefined;
-    // Only heal an orphaned copy here; turning it off by hand must stay off.
-    if (longContext.armedModel && longContext.armedModel !== ctx.model)
-      await autoArm(ctx);
+    // Only heal here; turning it off by hand must stay off.
+    await healOrphanedCopy(ctx);
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
