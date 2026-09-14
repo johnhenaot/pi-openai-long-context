@@ -81,6 +81,16 @@ test("only GPT-5.6 and GPT-6 models on capped providers are targeted", () => {
     "routes other than openai and openai-codex already ship 1.05M",
   );
   assert.ok(!isTarget(undefined));
+  assert.ok(
+    isTarget(model({ provider: "openrouter", id: "gpt-6-astra" }), [
+      "openrouter",
+    ]),
+  );
+  assert.ok(
+    !isTarget(model({ provider: "anthropic", id: "gpt-6-astra" }), [
+      "openrouter",
+    ]),
+  );
 });
 
 test("enabling raises the window, resetting restores the real built-in", () => {
@@ -287,6 +297,73 @@ test("automatic child activation requires an explicit config opt-in", async () =
   ctx.mode = "print";
   await handlers.get("session_start")?.({}, ctx);
   assert.equal(ctx.model.contextWindow, 272_000);
+});
+
+test("additional providers require explicit configuration", async () => {
+  writeFileSync(
+    join(testAgentDir, "openai-long-context.json"),
+    '{"additionalProviders":["openrouter"]}',
+  );
+  const { ctx, handlers, commandHandler, autocompleteFactories } =
+    extensionHarness(undefined);
+  ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commandHandler("", ctx);
+  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+
+  const factory = autocompleteFactories[0];
+  assert.ok(factory);
+  const provider = factory({
+    getSuggestions: async () => ({
+      prefix: "/",
+      items: [{ value: "long-context", label: "long-context" }],
+    }),
+    applyCompletion: (lines, cursorLine, cursorCol) => ({
+      lines,
+      cursorLine,
+      cursorCol,
+    }),
+  });
+  assert.deepEqual(
+    await provider.getSuggestions(["/"], 0, 1, {
+      signal: new AbortController().signal,
+    }),
+    { prefix: "/", items: [{ value: "long-context", label: "long-context" }] },
+  );
+});
+
+test("configured providers follow both auto-enable flags and model switches", async () => {
+  for (const child of [false, true]) {
+    if (child) process.env.PI_SUBAGENT_CHILD = "1";
+    else delete process.env.PI_SUBAGENT_CHILD;
+    writeFileSync(
+      join(testAgentDir, "openai-long-context.json"),
+      JSON.stringify({
+        additionalProviders: ["openrouter"],
+        [child ? "autoEnableSubagents" : "autoEnable"]: true,
+      }),
+    );
+    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+    const original = model({ provider: "openrouter", id: "gpt-6-astra" });
+    ctx.model = original;
+
+    await handlers.get("session_start")?.({}, ctx);
+    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+    assert.notEqual(ctx.model, original);
+    assert.equal(original.contextWindow, 272_000);
+
+    await commandHandler("", ctx);
+    await handlers.get("before_agent_start")?.({}, ctx);
+    assert.equal(ctx.model.contextWindow, 272_000);
+
+    ctx.model = original;
+    await handlers.get("model_select")?.({}, ctx);
+    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+    assert.equal(original.contextWindow, 272_000);
+    await handlers.get("session_shutdown")?.({}, ctx);
+    assert.equal(ctx.model.contextWindow, 272_000);
+  }
 });
 
 test("opted-in sessions in a marked runner automatically arm only supported models", async () => {
