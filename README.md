@@ -33,10 +33,10 @@ Create `~/.pi/agent/openai-long-context.json` (or the same file in your `PI_CODI
 
 | Flag | Turns long context on for |
 | --- | --- |
-| `autoEnable` | Your own pi sessions |
-| `autoEnableSubagents` | [pi-subagents](https://github.com/nicobailon/pi-subagents) children in background runners |
+| `autoEnable` | Your own pi sessions, and foreground children running inside them |
+| `autoEnableSubagents` | [pi-subagents](https://github.com/nicobailon/pi-subagents) children in background runner processes |
 
-Use one, the other, or both — they are independent. Only the literal `true` counts; anything else (missing file, `false`, `"true"`, broken JSON) leaves that side off. pi never writes this file for you.
+Use one, the other, or both — they are independent. The split is by process, not by foreground or background: a child gets whichever flag applies to the process it runs in. Only the literal `true` counts; anything else (missing file, `false`, `"true"`, broken JSON) leaves that side off. pi never writes this file for you.
 
 Opted-in sessions turn long context on at startup and again whenever you pick a supported model. `/long-context` still wins for the model you are on, until the next model switch or session.
 
