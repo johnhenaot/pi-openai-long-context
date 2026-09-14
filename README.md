@@ -38,6 +38,17 @@ Automatic long context for [pi-subagents](https://github.com/nicobailon/pi-subag
 
 If you use `PI_CODING_AGENT_DIR`, put the file in that directory instead. Only the boolean `true` enables this behavior; missing, false, unreadable, or invalid config leaves it off. This extension never creates or changes the config file.
 
+By default, only the `openai` and `openai-codex` providers are enabled. To use an equivalent model through another provider, explicitly add its provider name to the same file. This applies to manual toggles, the command menu, and opted-in children:
+
+```json
+{
+  "additionalProviders": ["openrouter"],
+  "autoEnableSubagents": true
+}
+```
+
+Only add providers whose GPT-5.6 or GPT-6 model documents a context window of at least 1.05M tokens.
+
 After opting in, child sessions in a marked runner automatically enable long context at startup when this extension is loaded and the selected model is supported. No per-launch flag, `/long-context` command, or `extensionBindings` is needed, and the main session's toggle is unchanged. `/long-context` remains available without opting in.
 
 The `PI_SUBAGENT_CHILD=1` marker identifies the **runner process**, not an individual child's execution mode. The opt-in therefore also covers nested foreground children (`async: false`) in that process when they load this extension. Foreground children outside a marked runner remain manual.
@@ -52,7 +63,7 @@ Past 272K input tokens, OpenAI bills the **whole request** at its long-context r
 
 ## Supported models and providers
 
-Works on `gpt-5.6-*` and `gpt-6-*` models on the `openai` and `openai-codex` providers. Other providers are left untouched.
+Works on `gpt-5.6-*` and `gpt-6-*` models on the `openai` and `openai-codex` providers. Other providers can be explicitly enabled with `additionalProviders` in `openai-long-context.json`; providers not listed there are left untouched.
 
 The toggle uses 1.05M tokens, the documented maximum for GPT-5.6 and [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra). Future `gpt-6-*` models are matched automatically, but this extension does not validate their limits; verify each model's documented context window before enabling it.
 
