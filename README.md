@@ -18,6 +18,11 @@ Restart pi, or run `/reload`.
 
 Toggles the big window on and off for the supported model you are using. A `⚠` in the footer means it is on. The command only appears in the `/` menu for `gpt-5.6-*` and `gpt-6-*` models on `openai` or `openai-codex`.
 
+`/long-context-status [requestId]` reports the current state without changing
+it. It sends a JSON notification with type
+`pi-openai-long-context.status`; when supplied, `requestId` is included in the
+payload. This command is also available through RPC command discovery.
+
 ## It turns itself off
 
 In ordinary sessions, switching models, starting a new session, restarting pi, `/reload` — all of it drops you back to 272K, so you cannot leave it on and be billed for it later. Nothing is saved to your settings.

@@ -150,7 +150,7 @@ type AutocompleteFactory = Parameters<
 function extensionHarness(choice: string | undefined, hasUI = true) {
   const handlers = new Map<string, Handler>();
   const autocompleteFactories: AutocompleteFactory[] = [];
-  let commandHandler: Handler | undefined;
+  const commandHandlers = new Map<string, Handler>();
   const selections: string[] = [];
   const notifications: string[] = [];
   const statuses: Array<string | undefined> = [];
@@ -177,8 +177,8 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
 
   openaiLongContext({
     on: (event: string, handler: Handler) => handlers.set(event, handler),
-    registerCommand: (_name: string, command: { handler: Handler }) => {
-      commandHandler = command.handler;
+    registerCommand: (name: string, command: { handler: Handler }) => {
+      commandHandlers.set(name, command.handler);
     },
     setModel: async (selected: Model<Api>) => {
       ctx.model = selected;
@@ -192,9 +192,11 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     },
   } as unknown as ExtensionAPI);
 
+  const commandHandler = commandHandlers.get("long-context");
   assert.ok(commandHandler);
   return {
     commandHandler,
+    commandHandlers,
     ctx,
     handlers,
     selections,
@@ -205,6 +207,90 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     getThinkingLevel: () => thinkingLevel,
   };
 }
+
+function statusHandler(harness: ReturnType<typeof extensionHarness>): Handler {
+  const handler = harness.commandHandlers.get("long-context-status");
+  assert.ok(handler);
+  return handler;
+}
+
+test("status reports a supported model that is disabled", async () => {
+  const harness = extensionHarness(undefined);
+  await statusHandler(harness)("", harness.ctx);
+
+  assert.deepEqual(JSON.parse(harness.notifications[0]), {
+    type: "pi-openai-long-context.status",
+    enabled: false,
+    supported: true,
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    contextWindow: 272_000,
+  });
+  assert.match(harness.notifications[1], /Long context is disabled/);
+});
+
+test("status reports an enabled supported model", async () => {
+  const harness = extensionHarness(undefined);
+  await harness.commandHandler("", harness.ctx);
+  harness.notifications.length = 0;
+
+  await statusHandler(harness)("", harness.ctx);
+  const payload = JSON.parse(harness.notifications[0]);
+  assert.equal(payload.enabled, true);
+  assert.equal(payload.supported, true);
+  assert.equal(payload.contextWindow, MAX_CONTEXT_WINDOW);
+});
+
+test("status reports unsupported models as disabled", async () => {
+  const harness = extensionHarness(undefined);
+  harness.ctx.model = model({ provider: "anthropic", id: "claude-sonnet-4-5" });
+
+  await statusHandler(harness)("request-1", harness.ctx);
+  assert.deepEqual(JSON.parse(harness.notifications[0]), {
+    type: "pi-openai-long-context.status",
+    requestId: "request-1",
+    enabled: false,
+    supported: false,
+    provider: "anthropic",
+    model: "claude-sonnet-4-5",
+    contextWindow: 272_000,
+  });
+});
+
+test("status reports an already-large context window", async () => {
+  const harness = extensionHarness(undefined);
+  harness.ctx.model = model({
+    provider: "openai",
+    id: "gpt-5.6-sol",
+    contextWindow: 2_000_000,
+  });
+
+  await statusHandler(harness)("request-2", harness.ctx);
+  assert.equal(JSON.parse(harness.notifications[0]).contextWindow, 2_000_000);
+});
+
+test("model switching clears enabled status", async () => {
+  const harness = extensionHarness(undefined);
+  await harness.commandHandler("", harness.ctx);
+  harness.ctx.model = model({ provider: "openai", id: "gpt-5.6-terra" });
+  await harness.handlers.get("model_select")?.({}, harness.ctx);
+
+  await statusHandler(harness)("request-3", harness.ctx);
+  assert.equal(JSON.parse(harness.notifications.at(-1)!).enabled, false);
+  assert.equal(harness.sol.contextWindow, 272_000);
+});
+
+test("status propagates request IDs and does not mutate state", async () => {
+  const harness = extensionHarness(undefined);
+  const beforeWindow = harness.sol.contextWindow;
+  const beforeStatusCount = harness.statuses.length;
+
+  await statusHandler(harness)("integration-42", harness.ctx);
+
+  assert.equal(JSON.parse(harness.notifications[0]).requestId, "integration-42");
+  assert.equal(harness.sol.contextWindow, beforeWindow);
+  assert.equal(harness.statuses.length, beforeStatusCount);
+});
 
 test("automatic child activation requires an explicit config opt-in", async (t) => {
   const previous = process.env.PI_SUBAGENT_CHILD;

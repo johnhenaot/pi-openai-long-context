@@ -11,6 +11,8 @@ import type {
 export const MAX_CONTEXT_WINDOW = 1_050_000;
 
 export const COMMAND_NAME = "long-context";
+export const STATUS_COMMAND_NAME = "long-context-status";
+const STATUS_TYPE = "pi-openai-long-context.status";
 
 const SUPPORTED_MODEL_ID = /^gpt-(?:5\.6|6)-/;
 
@@ -171,6 +173,34 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
         `Long context is active for ${model.provider}/${model.id} — ${model.contextWindow.toLocaleString("en-US")} tokens.`,
         "warning",
       );
+    },
+  });
+
+  pi.registerCommand(STATUS_COMMAND_NAME, {
+    description: "Report long-context status as a JSON notification",
+    handler: async (args, ctx) => {
+      const model = ctx.model;
+      const supported = isTarget(model);
+      const payload = {
+        type: STATUS_TYPE,
+        ...(args.trim() ? { requestId: args.trim() } : {}),
+        enabled: supported && longContext.armedModel === model,
+        supported,
+        ...(model
+          ? {
+              provider: model.provider,
+              model: model.id,
+              contextWindow: model.contextWindow,
+            }
+          : {}),
+      };
+
+      ctx.ui.notify(JSON.stringify(payload), "info");
+      if (!args.trim() && ctx.mode === "tui") {
+        const subject = model ? `${model.provider}/${model.id}` : "no model";
+        const state = payload.enabled ? "enabled" : "disabled";
+        ctx.ui.notify(`Long context is ${state} for ${subject}.`, "info");
+      }
     },
   });
 }
