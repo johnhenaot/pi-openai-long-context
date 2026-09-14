@@ -308,6 +308,25 @@ test("status propagates request IDs and does not mutate state", async () => {
   assert.equal(harness.statuses.length, beforeStatusCount);
 });
 
+test("RPC status emits one stable JSON notification", async () => {
+  const harness = extensionHarness(undefined, false);
+  harness.ctx.mode = "rpc";
+
+  await statusHandler(harness)("abc123", harness.ctx);
+
+  assert.deepEqual(harness.notifications, [
+    JSON.stringify({
+      type: "pi-openai-long-context.status",
+      requestId: "abc123",
+      enabled: false,
+      supported: true,
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      contextWindow: 272_000,
+    }),
+  ]);
+});
+
 test("automatic child activation requires an explicit config opt-in", async (t) => {
   const previous = process.env.PI_SUBAGENT_CHILD;
   process.env.PI_SUBAGENT_CHILD = "1";
