@@ -279,6 +279,12 @@ test("status reports an already-large context window", async () => {
   assert.equal(JSON.parse(harness.notifications[0]).contextWindow, 2_000_000);
 });
 
+test("both long-context commands are registered", () => {
+  const harness = extensionHarness(undefined);
+  assert.ok(harness.commandHandlers.has("long-context"));
+  assert.ok(harness.commandHandlers.has("long-context-status"));
+});
+
 test("model switching clears enabled status", async () => {
   const harness = extensionHarness(undefined);
   await harness.commandHandler("", harness.ctx);

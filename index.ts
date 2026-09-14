@@ -211,7 +211,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     description: "Report long-context status as a JSON notification",
     handler: async (args, ctx) => {
       const model = ctx.model;
-      const supported = isTarget(model);
+      const supported = isTarget(model, additionalProviders);
       const payload = {
         type: STATUS_TYPE,
         ...(args.trim() ? { requestId: args.trim() } : {}),
