@@ -18,15 +18,45 @@ const SUPPORTED_MODEL_ID = /^gpt-(?:5\.6|6)-/;
 
 const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
 
-export function isTarget(model: Model<Api> | undefined): model is Model<Api> {
+export function isTarget(
+  model: Model<Api> | undefined,
+  additionalProviders: readonly string[] = [],
+): model is Model<Api> {
   return (
     model !== undefined &&
-    CAPPED_PROVIDERS.has(model.provider) &&
+    (CAPPED_PROVIDERS.has(model.provider) ||
+      additionalProviders.includes(model.provider)) &&
     SUPPORTED_MODEL_ID.test(model.id)
   );
 }
 
-export function createLongContext() {
+type LongContextConfig = {
+  autoEnableSubagents?: boolean;
+  additionalProviders?: unknown;
+};
+
+async function readConfig(): Promise<LongContextConfig> {
+  try {
+    const config = JSON.parse(
+      await readFile(join(getAgentDir(), "openai-long-context.json"), "utf8"),
+    );
+    return config !== null && typeof config === "object" && !Array.isArray(config)
+      ? config
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function getAdditionalProviders(config: LongContextConfig): string[] {
+  return Array.isArray(config.additionalProviders)
+    ? config.additionalProviders.filter(
+        (provider): provider is string => typeof provider === "string",
+      )
+    : [];
+}
+
+export function createLongContext(additionalProviders: readonly string[] = []) {
   let armed: { model: Model<Api>; previousContextWindow: number } | undefined;
 
   return {
@@ -35,7 +65,7 @@ export function createLongContext() {
     },
 
     enable(model: Model<Api> | undefined): boolean {
-      if (armed !== undefined || !isTarget(model)) return false;
+      if (armed !== undefined || !isTarget(model, additionalProviders)) return false;
 
       armed = { model, previousContextWindow: model.contextWindow };
       model.contextWindow = Math.max(model.contextWindow, MAX_CONTEXT_WINDOW);
@@ -53,7 +83,8 @@ export function createLongContext() {
 }
 
 export default function openaiLongContext(pi: ExtensionAPI): void {
-  const longContext = createLongContext();
+  const additionalProviders: string[] = [];
+  const longContext = createLongContext(additionalProviders);
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
 
@@ -74,7 +105,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
           cursorCol,
           options,
         );
-        if (suggestions === null || isTarget(ctx.model)) return suggestions;
+        if (suggestions === null || isTarget(ctx.model, additionalProviders))
+          return suggestions;
 
         const items = suggestions.items.filter(
           (item) => item.value !== COMMAND_NAME,
@@ -90,22 +122,21 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   };
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
+    const config = await readConfig();
+    additionalProviders.splice(
+      0,
+      additionalProviders.length,
+      ...getAdditionalProviders(config),
+    );
     hideFromMenuUnlessTargeted(ctx);
     if (
       process.env.PI_SUBAGENT_CHILD !== "1" ||
-      !isTarget(ctx.model) ||
+      !isTarget(ctx.model, additionalProviders) ||
       longContext.armedModel
     )
       return;
 
-    try {
-      const config = JSON.parse(
-        await readFile(join(getAgentDir(), "openai-long-context.json"), "utf8"),
-      );
-      if (config?.autoEnableSubagents !== true) return;
-    } catch {
-      return;
-    }
+    if (config.autoEnableSubagents !== true) return;
 
     // Background children share a model registry; only mutate this session's copy.
     const model = { ...ctx.model };
@@ -159,9 +190,9 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       }
 
       const model = ctx.model;
-      if (!isTarget(model) || !longContext.enable(model)) {
+      if (!isTarget(model, additionalProviders) || !longContext.enable(model)) {
         ctx.ui.notify(
-          `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on openai or openai-codex. Switch to one first.`,
+          `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on supported providers. Switch to one first.`,
           "warning",
         );
         return;
