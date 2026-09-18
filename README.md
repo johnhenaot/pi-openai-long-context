@@ -2,6 +2,8 @@
 
 Raise GPT-5.6 and GPT-6 models (including GPT-6 Astra) from pi's **272K** context window to **1.05M**, one task at a time.
 
+https://github.com/user-attachments/assets/689360eb-6e11-47a2-930c-c6741ec232c6
+
 ## Install
 
 ```bash
