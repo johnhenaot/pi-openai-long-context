@@ -1,16 +1,22 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
   ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const MAX_CONTEXT_WINDOW = 1_050_000;
 
 export const COMMAND_NAME = "long-context";
+
+const CONFIG_FILE = "openai-long-context.json";
+
+const SUBAGENT_RUNNER_MARKER = "PI_SUBAGENT_CHILD";
+
+const KEEP_LONG_CONTEXT = "Keep long context";
 
 const SUPPORTED_MODEL_ID = /^gpt-(?:5\.6|6)-/;
 
@@ -50,10 +56,31 @@ export function createLongContext() {
   };
 }
 
+function isSubagentRunnerProcess(): boolean {
+  return process.env[SUBAGENT_RUNNER_MARKER] === "1";
+}
+
+async function readAutoEnableSetting(): Promise<boolean> {
+  const key = isSubagentRunnerProcess() ? "autoEnableSubagents" : "autoEnable";
+  try {
+    const config = JSON.parse(
+      await readFile(join(getAgentDir(), CONFIG_FILE), "utf8"),
+    );
+    return config?.[key] === true;
+  } catch {
+    return false;
+  }
+}
+
 export default function openaiLongContext(pi: ExtensionAPI): void {
   const longContext = createLongContext();
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
+  let autoEnabled = false;
+  let raisingWindow = false;
+  let modelBeingSet: Model<Api> | undefined;
+  let raiseInterruptedBy: Model<Api> | undefined;
+  let raiseCancelled = false;
 
   const setMarker = (ui: ExtensionUIContext, on: boolean): void => {
     ui.setStatus(COMMAND_NAME, on ? ui.theme.fg("warning", "⚠") : undefined);
@@ -87,77 +114,144 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     }));
   };
 
+  const releaseRaisedWindow = (ctx: ExtensionContext): boolean => {
+    if (!longContext.reset()) return false;
+    setMarker(ctx.ui, false);
+    return true;
+  };
+
+  const setModelUntilTheUserStopsSwitching = async (
+    model: Model<Api>,
+  ): Promise<boolean> => {
+    let next: Model<Api> | undefined = model;
+    while (next !== undefined) {
+      modelBeingSet = next;
+      raiseInterruptedBy = undefined;
+      if (!(await pi.setModel(next))) return false;
+      next = raiseInterruptedBy;
+    }
+    return true;
+  };
+
+  const raiseWindowOnPrivateCopy = async (
+    ctx: ExtensionContext,
+  ): Promise<Model<Api> | undefined> => {
+    if (raisingWindow || !isTarget(ctx.model)) return undefined;
+
+    raisingWindow = true;
+    raiseCancelled = false;
+    const privateCopy = { ...ctx.model };
+    const requestedThinkingLevel = pi.getThinkingLevel();
+    let interrupted = false;
+    try {
+      if (!(await setModelUntilTheUserStopsSwitching(privateCopy)))
+        return undefined;
+      interrupted = modelBeingSet !== privateCopy || raiseCancelled;
+      if (interrupted) return undefined;
+      pi.setThinkingLevel(requestedThinkingLevel);
+      if (!longContext.enable(privateCopy)) return undefined;
+      setMarker(ctx.ui, true);
+      return privateCopy;
+    } finally {
+      raisingWindow = false;
+      modelBeingSet = undefined;
+      raiseInterruptedBy = undefined;
+      if (interrupted && !raiseCancelled) await raiseWindowWhenAutoEnabled(ctx);
+    }
+  };
+
+  const raisedCopyDetachedFromSession = (ctx: ExtensionContext): boolean =>
+    longContext.armedModel !== undefined &&
+    longContext.armedModel !== ctx.model;
+
+  const reattachRaisedWindow = async (
+    ctx: ExtensionContext,
+  ): Promise<boolean> => {
+    if (!raisedCopyDetachedFromSession(ctx)) return false;
+    releaseRaisedWindow(ctx);
+    return (await raiseWindowOnPrivateCopy(ctx)) !== undefined;
+  };
+
+  const raiseWindowWhenAutoEnabled = async (
+    ctx: ExtensionContext,
+  ): Promise<void> => {
+    if (!autoEnabled || longContext.armedModel) return;
+    await raiseWindowOnPrivateCopy(ctx);
+  };
+
+  const startsNewTurn = (event: { streamingBehavior?: unknown }): boolean =>
+    event.streamingBehavior === undefined;
+
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     hideFromMenuUnlessTargeted(ctx);
-    if (
-      process.env.PI_SUBAGENT_CHILD !== "1" ||
-      !isTarget(ctx.model) ||
-      longContext.armedModel
-    )
-      return;
-
-    try {
-      const config = JSON.parse(
-        await readFile(join(getAgentDir(), "openai-long-context.json"), "utf8"),
-      );
-      if (config?.autoEnableSubagents !== true) return;
-    } catch {
-      return;
-    }
-
-    // Background children share a model registry; only mutate this session's copy.
-    const model = { ...ctx.model };
-    const thinkingLevel = pi.getThinkingLevel();
-    if (!(await pi.setModel(model))) return;
-    pi.setThinkingLevel(thinkingLevel);
-    if (longContext.enable(model)) setMarker(ctx.ui, true);
+    autoEnabled = await readAutoEnableSetting();
+    await raiseWindowWhenAutoEnabled(ctx);
   });
 
-  pi.on("before_agent_start", () => {
+  pi.on("input", async (event, ctx: ExtensionContext) => {
+    if (startsNewTurn(event)) await reattachRaisedWindow(ctx);
+  });
+
+  pi.on("before_agent_start", async (_event, ctx: ExtensionContext) => {
     warnBeforeAutoCompaction = undefined;
+    await reattachRaisedWindow(ctx);
   });
+
+  const compactionContinuesAnInterruptedTurn = (event: {
+    reason: string;
+    willRetry?: boolean;
+  }): boolean => event.reason === "overflow" && event.willRetry === true;
 
   pi.on("session_before_compact", async (event, ctx) => {
-    if (
-      event.reason === "manual" ||
-      ctx.model !== warnBeforeAutoCompaction ||
-      !ctx.hasUI
-    )
-      return;
+    if (event.reason === "manual") return;
+    if (await reattachRaisedWindow(ctx))
+      return compactionContinuesAnInterruptedTurn(event)
+        ? undefined
+        : { cancel: true };
+    if (ctx.model !== warnBeforeAutoCompaction || !ctx.hasUI) return;
 
     const choice = await ctx.ui.select(
       "Compaction required after turning off long context",
-      ["Compact now", "Keep long context"],
+      ["Compact now", KEEP_LONG_CONTEXT],
     );
 
     warnBeforeAutoCompaction = undefined;
-    if (choice !== "Keep long context" || !longContext.enable(ctx.model))
-      return;
-    setMarker(ctx.ui, true);
+    if (choice !== KEEP_LONG_CONTEXT) return;
+    if (!(await raiseWindowOnPrivateCopy(ctx))) return;
     return { cancel: true };
   });
 
-  pi.on("model_select", (_event, ctx: ExtensionContext) => {
+  pi.on("model_select", async (event, ctx: ExtensionContext) => {
     warnBeforeAutoCompaction = undefined;
-    if (longContext.reset()) setMarker(ctx.ui, false);
+    if (raisingWindow) {
+      const chosen = event.model ?? ctx.model;
+      if (chosen !== modelBeingSet) raiseInterruptedBy = chosen;
+      return;
+    }
+    releaseRaisedWindow(ctx);
+    await raiseWindowWhenAutoEnabled(ctx);
   });
 
   pi.on("session_shutdown", (_event, ctx: ExtensionContext) => {
-    if (longContext.reset()) setMarker(ctx.ui, false);
+    releaseRaisedWindow(ctx);
   });
 
   pi.registerCommand(COMMAND_NAME, {
     description: `Raise the GPT-5.6 / GPT-6 context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
     handler: async (_args, ctx) => {
-      const armedModel = longContext.armedModel;
-      if (longContext.reset()) {
-        warnBeforeAutoCompaction = armedModel;
-        setMarker(ctx.ui, false);
+      if (raisingWindow) {
+        raiseCancelled = true;
+        raiseInterruptedBy = ctx.model;
+        return;
+      }
+      if (releaseRaisedWindow(ctx)) {
+        warnBeforeAutoCompaction = ctx.model;
         return;
       }
 
-      const model = ctx.model;
-      if (!isTarget(model) || !longContext.enable(model)) {
+      const raised = await raiseWindowOnPrivateCopy(ctx);
+      if (raiseCancelled) return;
+      if (raised === undefined) {
         ctx.ui.notify(
           `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on openai or openai-codex. Switch to one first.`,
           "warning",
@@ -166,9 +260,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       }
 
       warnBeforeAutoCompaction = undefined;
-      setMarker(ctx.ui, true);
       ctx.ui.notify(
-        `Long context is active for ${model.provider}/${model.id} — ${model.contextWindow.toLocaleString("en-US")} tokens.`,
+        `Long context is active for ${raised.provider}/${raised.id} — ${raised.contextWindow.toLocaleString("en-US")} tokens.`,
         "warning",
       );
     },

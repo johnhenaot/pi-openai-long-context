@@ -1,6 +1,8 @@
 # pi-openai-long-context
 
-Raise GPT-5.6 and GPT-6 models (including GPT-6 Astra) from pi's **272K** context window to **1.05M**, one task at a time.
+Raise GPT-5.6 and GPT-6 models from pi's **272K** context window to **1.05M**.
+
+It is off until you ask for it, because [it costs more](#what-it-costs).
 
 https://github.com/user-attachments/assets/689360eb-6e11-47a2-930c-c6741ec232c6
 
@@ -12,53 +14,65 @@ pi install npm:pi-openai-long-context
 
 Restart pi, or run `/reload`.
 
-## Use it
+## Turn it on for one task
 
 ```text
 /long-context
 ```
 
-Toggles the big window on and off for the supported model you are using. A `⚠` in the footer means it is on. The command only appears in the `/` menu for `gpt-5.6-*` and `gpt-6-*` models on `openai` or `openai-codex`.
+Run it again to turn it off. A `⚠` in the footer means it is on. The command only shows up in the `/` menu when you are on a supported model.
 
-## It turns itself off
+## Turn it on for good
 
-In ordinary sessions, switching models, starting a new session, restarting pi, `/reload` — all of it drops you back to 272K, so you cannot leave it on and be billed for it later. Nothing is saved to your settings.
-
-Compaction is the exception: it keeps the big window, which is the point of turning it on.
-
-If turning it off would immediately trigger automatic compaction, pi asks whether to compact or keep long context instead.
-
-## pi-subagents
-
-Automatic long context for [pi-subagents](https://github.com/nicobailon/pi-subagents) is **off by default**. To opt in once for child sessions in its background runner processes, create `~/.pi/agent/openai-long-context.json`:
+Create `~/.pi/agent/openai-long-context.json` (or the same file in your `PI_CODING_AGENT_DIR`):
 
 ```json
 {
+  "autoEnable": true,
   "autoEnableSubagents": true
 }
 ```
 
-If you use `PI_CODING_AGENT_DIR`, put the file in that directory instead. Only the boolean `true` enables this behavior; missing, false, unreadable, or invalid config leaves it off. This extension never creates or changes the config file.
+| Flag | Turns long context on for |
+| --- | --- |
+| `autoEnable` | Your own pi sessions, and foreground children running inside them |
+| `autoEnableSubagents` | [pi-subagents](https://github.com/nicobailon/pi-subagents) children in background runner processes |
 
-After opting in, child sessions in a marked runner automatically enable long context at startup when this extension is loaded and the selected model is supported. No per-launch flag, `/long-context` command, or `extensionBindings` is needed, and the main session's toggle is unchanged. `/long-context` remains available without opting in.
+Use one, the other, or both — they are independent. The split is by process, not by foreground or background: a child gets whichever flag applies to the process it runs in. Only the literal `true` counts; anything else (missing file, `false`, `"true"`, broken JSON) leaves that side off. pi never writes this file for you.
 
-The `PI_SUBAGENT_CHILD=1` marker identifies the **runner process**, not an individual child's execution mode. The opt-in therefore also covers nested foreground children (`async: false`) in that process when they load this extension. Foreground children outside a marked runner remain manual.
+Opted-in sessions turn long context on at startup and again whenever you pick a supported model. `/long-context` still wins for the model you are on, until the next model switch or session.
 
-Background children normally discover installed extensions; foreground children need an explicit extension path. If necessary, include this extension's `index.ts` path in the agent's `extensions` or `subagentOnlyExtensions` configuration. Extension-denying policies still apply.
+To opt out, flip the flag to `false` or delete the file. The file is read when a session starts, so a running session keeps auto-arming until you `/reload` it (or start, resume, or fork one).
 
-Each child keeps its own context window. Compaction preserves it; toggling off, switching models, or shutting down restores the previous value. Starting or reloading a marked child session automatically enables it again only while opted in. To opt out, set `autoEnableSubagents` to `false` or remove the file; already-running children are unaffected. The long-context costs below apply to opted-in children too.
+## It turns itself off
+
+Without the config above, long context never outlives the moment: switching models, a new session, restarting pi, `/reload` — all of it drops you back to 272K, so you cannot leave it on and be billed for it a week later. Nothing is written to your settings.
+
+Compaction is the exception: it keeps the big window, which is the whole point of turning it on. And if turning it *off* would immediately trigger automatic compaction, pi asks whether to compact or keep long context instead.
 
 ## What it costs
 
-Past 272K input tokens, OpenAI bills the **whole request** at its long-context rate — see [OpenAI's pricing](https://platform.openai.com/docs/pricing). On a subscription, that also burns through your quota faster.
+Past 272K input tokens, OpenAI bills the **whole request** at its long-context rate — see [OpenAI's pricing](https://platform.openai.com/docs/pricing). On a subscription, it burns through your quota faster too. That applies to every subagent child as well, and there can be a lot of those.
 
-## Supported models and providers
+## Supported models
 
-Works on `gpt-5.6-*` and `gpt-6-*` models on the `openai` and `openai-codex` providers. Other providers are left untouched.
+`gpt-5.6-*` and `gpt-6-*` on the `openai` and `openai-codex` providers. Everything else is left alone — other providers already ship the bigger window.
 
-The toggle uses 1.05M tokens, the documented maximum for GPT-5.6 and [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra). Future `gpt-6-*` models are matched automatically, but this extension does not validate their limits; verify each model's documented context window before enabling it.
+1.05M is the documented maximum for GPT-5.6 and [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra). Future `gpt-6-*` models match automatically, but their real limits are not checked here; look up a new model's context window before trusting it.
 
-If you already set your own context window for a supported model in `models.json`, turning this off restores *your* value, not pi's.
+If you set your own context window for a supported model in `models.json`, turning this off restores *your* value, not pi's.
+
+## Subagent details
+
+Which children this reaches, and what to do when it misses one.
+
+Nothing per launch is needed: no flag, no `/long-context`, no `extensionBindings`. An opted-in child raises its window at startup if the extension is loaded and its model is supported.
+
+`autoEnableSubagents` keys off `PI_SUBAGENT_CHILD=1`, which marks the **runner process**, not one child's execution mode. So it also covers nested foreground children (`async: false`) running in that process. A foreground child started directly inside your own pi process has no marker, so it follows `autoEnable` like your session does.
+
+Background children discover installed extensions on their own; foreground children need an explicit path. If a child does not pick this up, add this extension's `index.ts` to the agent's `extensions` or `subagentOnlyExtensions`. Extension-denying policies still apply.
+
+Each child gets its own window. One child turning it off, switching models, or shutting down never touches its siblings.
 
 ## License
 
