@@ -18,19 +18,25 @@ const SUBAGENT_RUNNER_MARKER = "PI_SUBAGENT_CHILD";
 
 const KEEP_LONG_CONTEXT = "Keep long context";
 
-const SUPPORTED_MODEL_ID = /^gpt-(?:5\.6|6)-/;
+const SUPPORTED_MODEL_ID = /^(?:[^/]+\/)?gpt-(?:5\.6|6)-/;
 
 const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
 
-export function isTarget(model: Model<Api> | undefined): model is Model<Api> {
+export function isTarget(
+  model: Model<Api> | undefined,
+  additionalProviders: readonly string[] = [],
+): model is Model<Api> {
   return (
     model !== undefined &&
-    CAPPED_PROVIDERS.has(model.provider) &&
+    (CAPPED_PROVIDERS.has(model.provider) ||
+      additionalProviders.includes(model.provider)) &&
     SUPPORTED_MODEL_ID.test(model.id)
   );
 }
 
-export function createLongContext() {
+export function createLongContext(
+  getAdditionalProviders: () => readonly string[] = () => [],
+) {
   let armed: { model: Model<Api>; previousContextWindow: number } | undefined;
 
   return {
@@ -39,7 +45,8 @@ export function createLongContext() {
     },
 
     enable(model: Model<Api> | undefined): boolean {
-      if (armed !== undefined || !isTarget(model)) return false;
+      if (armed !== undefined || !isTarget(model, getAdditionalProviders()))
+        return false;
 
       armed = { model, previousContextWindow: model.contextWindow };
       model.contextWindow = Math.max(model.contextWindow, MAX_CONTEXT_WINDOW);
@@ -60,20 +67,38 @@ function isSubagentRunnerProcess(): boolean {
   return process.env[SUBAGENT_RUNNER_MARKER] === "1";
 }
 
-async function readAutoEnableSetting(): Promise<boolean> {
-  const key = isSubagentRunnerProcess() ? "autoEnableSubagents" : "autoEnable";
+type LongContextConfig = {
+  autoEnable?: boolean;
+  autoEnableSubagents?: boolean;
+  additionalProviders?: unknown;
+};
+
+async function readConfig(): Promise<LongContextConfig> {
   try {
     const config = JSON.parse(
       await readFile(join(getAgentDir(), CONFIG_FILE), "utf8"),
     );
-    return config?.[key] === true;
+    return config !== null &&
+      typeof config === "object" &&
+      !Array.isArray(config)
+      ? config
+      : {};
   } catch {
-    return false;
+    return {};
   }
 }
 
+function getAdditionalProviders(config: LongContextConfig): string[] {
+  return Array.isArray(config.additionalProviders)
+    ? config.additionalProviders.filter(
+        (provider): provider is string => typeof provider === "string",
+      )
+    : [];
+}
+
 export default function openaiLongContext(pi: ExtensionAPI): void {
-  const longContext = createLongContext();
+  let additionalProviders: string[] = [];
+  const longContext = createLongContext(() => additionalProviders);
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
   let autoEnabled = false;
@@ -99,7 +124,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
           cursorCol,
           options,
         );
-        if (suggestions === null || isTarget(ctx.model)) return suggestions;
+        if (suggestions === null || isTarget(ctx.model, additionalProviders))
+          return suggestions;
 
         const items = suggestions.items.filter(
           (item) => item.value !== COMMAND_NAME,
@@ -136,7 +162,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   const raiseWindowOnPrivateCopy = async (
     ctx: ExtensionContext,
   ): Promise<Model<Api> | undefined> => {
-    if (raisingWindow || !isTarget(ctx.model)) return undefined;
+    if (raisingWindow || !isTarget(ctx.model, additionalProviders))
+      return undefined;
 
     raisingWindow = true;
     raiseCancelled = false;
@@ -183,8 +210,13 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     event.streamingBehavior === undefined;
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
+    const config = await readConfig();
+    additionalProviders = getAdditionalProviders(config);
     hideFromMenuUnlessTargeted(ctx);
-    autoEnabled = await readAutoEnableSetting();
+    const key = isSubagentRunnerProcess()
+      ? "autoEnableSubagents"
+      : "autoEnable";
+    autoEnabled = config[key] === true;
     await raiseWindowWhenAutoEnabled(ctx);
   });
 
@@ -253,7 +285,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       if (raiseCancelled) return;
       if (raised === undefined) {
         ctx.ui.notify(
-          `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on openai or openai-codex. Switch to one first.`,
+          `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on openai, openai-codex, or configured additionalProviders. Switch to one first.`,
           "warning",
         );
         return;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, test } from "node:test";
+import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   type Api,
@@ -63,24 +63,80 @@ function model(
   };
 }
 
-test("only GPT-5.6 and GPT-6 models on capped providers are targeted", () => {
-  assert.ok(isTarget(model({ provider: "openai", id: "gpt-5.6-sol" })));
-  assert.ok(isTarget(model({ provider: "openai", id: "gpt-5.6-terra" })));
-  assert.ok(isTarget(model({ provider: "openai-codex", id: "gpt-5.6-sol" })));
+describe("isTarget", () => {
   for (const provider of ["openai", "openai-codex"]) {
-    for (const id of ["gpt-6-astra", "gpt-6-future-variant"]) {
-      assert.ok(isTarget(model({ provider, id })), `${provider}/${id}`);
-    }
-    for (const id of ["gpt-5.5", "gpt-6", "gpt-60-astra", "gpt-6.1-astra"]) {
-      assert.ok(!isTarget(model({ provider, id })), `${provider}/${id}`);
-    }
+    test(`accepts GPT-5.6 on ${provider}`, () => {
+      assert.ok(isTarget(model({ provider, id: "gpt-5.6-sol" })));
+      assert.ok(isTarget(model({ provider, id: "gpt-5.6-terra" })));
+    });
+
+    test(`accepts GPT-6 on ${provider}`, () => {
+      assert.ok(isTarget(model({ provider, id: "gpt-6-astra" })));
+      assert.ok(isTarget(model({ provider, id: "gpt-6-future-variant" })));
+    });
   }
-  assert.ok(!isTarget(model({ provider: "openrouter", id: "gpt-6-astra" })));
-  assert.ok(
-    !isTarget(model({ provider: "openrouter", id: "gpt-5.6-sol" })),
-    "routes other than openai and openai-codex already ship 1.05M",
-  );
-  assert.ok(!isTarget(undefined));
+
+  for (const id of ["gpt-5.5", "gpt-6", "gpt-60-astra", "gpt-6.1-astra"]) {
+    test(`rejects ${id} even on openai`, () => {
+      assert.ok(!isTarget(model({ provider: "openai", id })));
+    });
+  }
+
+  test("rejects supported models on providers that already ship 1.05M", () => {
+    assert.ok(!isTarget(model({ provider: "openrouter", id: "gpt-6-astra" })));
+    assert.ok(!isTarget(model({ provider: "openrouter", id: "gpt-5.6-sol" })));
+  });
+
+  test("rejects a missing model", () => {
+    assert.ok(!isTarget(undefined));
+  });
+
+  test("accepts a configured additional provider", () => {
+    assert.ok(
+      isTarget(model({ provider: "openrouter", id: "gpt-6-astra" }), [
+        "openrouter",
+      ]),
+    );
+  });
+
+  test("a configured provider still requires a supported model id", () => {
+    assert.ok(
+      !isTarget(model({ provider: "openrouter", id: "gpt-5.5" }), [
+        "openrouter",
+      ]),
+    );
+  });
+
+  test("rejects providers not in the configured list", () => {
+    assert.ok(
+      !isTarget(model({ provider: "anthropic", id: "gpt-6-astra" }), [
+        "openrouter",
+      ]),
+    );
+  });
+
+  test("accepts namespaced model IDs from catalog providers", () => {
+    assert.ok(
+      isTarget(model({ provider: "openrouter", id: "openai/gpt-6-astra" }), [
+        "openrouter",
+      ]),
+    );
+    assert.ok(
+      isTarget(model({ provider: "openrouter", id: "openai/gpt-5.6-sol" }), [
+        "openrouter",
+      ]),
+    );
+    assert.ok(
+      !isTarget(model({ provider: "openrouter", id: "openai/gpt-5.5" }), [
+        "openrouter",
+      ]),
+    );
+    assert.ok(
+      !isTarget(model({ provider: "openrouter", id: "openai/gpt-6.1-astra" }), [
+        "openrouter",
+      ]),
+    );
+  });
 });
 
 test("enabling raises the window, resetting restores the real built-in", () => {
@@ -287,6 +343,119 @@ test("automatic child activation requires an explicit config opt-in", async () =
   ctx.mode = "print";
   await handlers.get("session_start")?.({}, ctx);
   assert.equal(ctx.model.contextWindow, 272_000);
+});
+
+describe("additionalProviders", () => {
+  const config = (json: string) =>
+    writeFileSync(join(testAgentDir, "openai-long-context.json"), json);
+
+  test("an unconfigured provider is refused even for a supported model", async () => {
+    const { ctx, handlers, commandHandler, notifications } =
+      extensionHarness(undefined);
+    ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
+    await handlers.get("session_start")?.({}, ctx);
+
+    await commandHandler("", ctx);
+
+    assert.equal(ctx.model.contextWindow, 272_000);
+    assert.match(
+      notifications.at(-1) ?? "",
+      /only applies to GPT-5\.6 \/ GPT-6 models on openai, openai-codex, or configured additionalProviders/,
+    );
+  });
+
+  test("a configured provider toggles with a namespaced model ID", async () => {
+    config('{"additionalProviders":["openrouter"]}');
+    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+    ctx.model = model({ provider: "openrouter", id: "openai/gpt-5.6-sol" });
+    await handlers.get("session_start")?.({}, ctx);
+
+    await commandHandler("", ctx);
+
+    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  });
+
+  test("a configured provider toggles like openai", async () => {
+    config('{"additionalProviders":["openrouter"]}');
+    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+    ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
+    await handlers.get("session_start")?.({}, ctx);
+
+    await commandHandler("", ctx);
+
+    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  });
+
+  for (const [flag, child] of [
+    ["autoEnable", false],
+    ["autoEnableSubagents", true],
+  ] as const) {
+    test(`${flag} auto-arms a configured provider`, async () => {
+      if (child) process.env.PI_SUBAGENT_CHILD = "1";
+      config(`{"additionalProviders":["openrouter"],"${flag}":true}`);
+      const { ctx, handlers } = extensionHarness(undefined);
+      const original = model({ provider: "openrouter", id: "gpt-6-astra" });
+      ctx.model = original;
+
+      await handlers.get("session_start")?.({}, ctx);
+
+      assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+      assert.equal(original.contextWindow, 272_000, "arm a private copy");
+    });
+  }
+
+  for (const json of [
+    '{"additionalProviders":"openrouter"}',
+    '{"additionalProviders":{"0":"openrouter"}}',
+    '{"additionalProviders":[1,null,true]}',
+  ]) {
+    test(`ignores malformed config ${json}`, async () => {
+      config(json);
+      const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+      ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
+      await handlers.get("session_start")?.({}, ctx);
+
+      await commandHandler("", ctx);
+
+      assert.equal(ctx.model.contextWindow, 272_000);
+    });
+  }
+
+  test("keeps string entries when the list is mixed", async () => {
+    config('{"additionalProviders":[1,"openrouter"]}');
+    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+    ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
+    await handlers.get("session_start")?.({}, ctx);
+
+    await commandHandler("", ctx);
+
+    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  });
+
+  test("the menu shows long context for a configured provider", async () => {
+    config('{"additionalProviders":["openrouter"]}');
+    const { ctx, handlers, autocompleteFactories } =
+      extensionHarness(undefined);
+    ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
+    await handlers.get("session_start")?.({}, ctx);
+    const items = [{ value: "long-context", label: "long-context" }];
+    const factory = autocompleteFactories[0];
+    assert.ok(factory);
+    const provider = factory({
+      getSuggestions: async () => ({ prefix: "/", items }),
+      applyCompletion: (lines, cursorLine, cursorCol) => ({
+        lines,
+        cursorLine,
+        cursorCol,
+      }),
+    });
+
+    const suggestions = await provider.getSuggestions(["/"], 0, 1, {
+      signal: new AbortController().signal,
+    });
+
+    assert.deepEqual(suggestions, { prefix: "/", items });
+  });
 });
 
 test("opted-in sessions in a marked runner automatically arm only supported models", async () => {
