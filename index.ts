@@ -78,8 +78,9 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   let warnBeforeAutoCompaction: Model<Api> | undefined;
   let autoEnabled = false;
   let raisingWindow = false;
-  let modelBeingRaised: Model<Api> | undefined;
-  let modelChosenWhileRaising: Model<Api> | undefined;
+  let modelBeingSet: Model<Api> | undefined;
+  let raiseInterruptedBy: Model<Api> | undefined;
+  let raiseCancelled = false;
 
   const setMarker = (ui: ExtensionUIContext, on: boolean): void => {
     ui.setStatus(COMMAND_NAME, on ? ui.theme.fg("warning", "⚠") : undefined);
@@ -119,36 +120,44 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     return true;
   };
 
-  const armPrivateCopy = async (
-    ctx: ExtensionContext,
-  ): Promise<{ raised?: Model<Api>; interruptedBy?: Model<Api> }> => {
-    if (raisingWindow || !isTarget(ctx.model)) return {};
-
-    raisingWindow = true;
-    try {
-      const privateCopy = { ...ctx.model };
-      modelBeingRaised = privateCopy;
-      const requestedThinkingLevel = pi.getThinkingLevel();
-      if (!(await pi.setModel(privateCopy))) return {};
-      if (modelChosenWhileRaising !== undefined)
-        return { interruptedBy: modelChosenWhileRaising };
-      pi.setThinkingLevel(requestedThinkingLevel);
-      if (!longContext.enable(privateCopy)) return {};
-      setMarker(ctx.ui, true);
-      return { raised: privateCopy };
-    } finally {
-      raisingWindow = false;
-      modelBeingRaised = undefined;
-      modelChosenWhileRaising = undefined;
+  const setModelUntilTheUserStopsSwitching = async (
+    model: Model<Api>,
+  ): Promise<boolean> => {
+    let next: Model<Api> | undefined = model;
+    while (next !== undefined) {
+      modelBeingSet = next;
+      raiseInterruptedBy = undefined;
+      if (!(await pi.setModel(next))) return false;
+      next = raiseInterruptedBy;
     }
+    return true;
   };
 
   const raiseWindowOnPrivateCopy = async (
     ctx: ExtensionContext,
   ): Promise<Model<Api> | undefined> => {
-    const { raised, interruptedBy } = await armPrivateCopy(ctx);
-    if (interruptedBy !== undefined) await pi.setModel(interruptedBy);
-    return raised;
+    if (raisingWindow || !isTarget(ctx.model)) return undefined;
+
+    raisingWindow = true;
+    raiseCancelled = false;
+    const privateCopy = { ...ctx.model };
+    const requestedThinkingLevel = pi.getThinkingLevel();
+    let interrupted = false;
+    try {
+      if (!(await setModelUntilTheUserStopsSwitching(privateCopy)))
+        return undefined;
+      interrupted = modelBeingSet !== privateCopy || raiseCancelled;
+      if (interrupted) return undefined;
+      pi.setThinkingLevel(requestedThinkingLevel);
+      if (!longContext.enable(privateCopy)) return undefined;
+      setMarker(ctx.ui, true);
+      return privateCopy;
+    } finally {
+      raisingWindow = false;
+      modelBeingSet = undefined;
+      raiseInterruptedBy = undefined;
+      if (interrupted && !raiseCancelled) await raiseWindowWhenAutoEnabled(ctx);
+    }
   };
 
   const raisedCopyDetachedFromSession = (ctx: ExtensionContext): boolean =>
@@ -212,10 +221,11 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     return { cancel: true };
   });
 
-  pi.on("model_select", async (_event, ctx: ExtensionContext) => {
+  pi.on("model_select", async (event, ctx: ExtensionContext) => {
     warnBeforeAutoCompaction = undefined;
     if (raisingWindow) {
-      if (ctx.model !== modelBeingRaised) modelChosenWhileRaising = ctx.model;
+      const chosen = event.model ?? ctx.model;
+      if (chosen !== modelBeingSet) raiseInterruptedBy = chosen;
       return;
     }
     releaseRaisedWindow(ctx);
@@ -229,12 +239,18 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   pi.registerCommand(COMMAND_NAME, {
     description: `Raise the GPT-5.6 / GPT-6 context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
     handler: async (_args, ctx) => {
+      if (raisingWindow) {
+        raiseCancelled = true;
+        raiseInterruptedBy = ctx.model;
+        return;
+      }
       if (releaseRaisedWindow(ctx)) {
         warnBeforeAutoCompaction = ctx.model;
         return;
       }
 
       const raised = await raiseWindowOnPrivateCopy(ctx);
+      if (raiseCancelled) return;
       if (raised === undefined) {
         ctx.ui.notify(
           `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on openai or openai-codex. Switch to one first.`,

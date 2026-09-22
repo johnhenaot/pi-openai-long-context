@@ -189,13 +189,20 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     await handlers.get("model_select")?.({ model: selected }, ctx);
   };
 
-  let switchModelWhilePiIsSettingOne: (() => Promise<void>) | undefined;
+  let whilePiIsSettingAModel: (() => Promise<void>) | undefined;
 
   const userSwitchesTo = (chosen: Model<Api>): void => {
-    switchModelWhilePiIsSettingOne = async () => {
-      switchModelWhilePiIsSettingOne = undefined;
+    whilePiIsSettingAModel = async () => {
+      whilePiIsSettingAModel = undefined;
       ctx.model = chosen;
       await handlers.get("model_select")?.({ model: chosen }, ctx);
+    };
+  };
+
+  const userTogglesLongContext = (): void => {
+    whilePiIsSettingAModel = async () => {
+      whilePiIsSettingAModel = undefined;
+      await commandHandler?.("", ctx);
     };
   };
 
@@ -205,10 +212,10 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
       commandHandler = command.handler;
     },
     setModel: async (selected: Model<Api>) => {
+      await whilePiIsSettingAModel?.();
       ctx.model = selected;
       thinkingLevel = THINKING_LEVEL_PI_APPLIES_ON_MODEL_CHANGE;
       await emitModelSelectEvenThoughPiSkipsItForSameIdModels(selected);
-      await switchModelWhilePiIsSettingOne?.();
       return true;
     },
     getThinkingLevel: () => thinkingLevel,
@@ -228,6 +235,7 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
     statuses,
     autocompleteFactories,
     userSwitchesTo,
+    userTogglesLongContext,
     getThinkingLevel: () => thinkingLevel,
   };
 }
@@ -552,6 +560,70 @@ test("a model switch during the raise wins, and that model is armed instead", as
   );
   assert.equal(switchedToTerra.ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
   assert.equal(terra.contextWindow, 272_000);
+});
+
+test("a second choice made while the first is being restored wins too", async () => {
+  writeFileSync(
+    join(testAgentDir, "openai-long-context.json"),
+    '{"autoEnable":true}',
+  );
+  const { ctx, handlers, registryModel, userSwitchesTo } =
+    extensionHarness(undefined);
+  const claude = model({
+    provider: "anthropic",
+    id: "claude-sonnet-4-5",
+    contextWindow: 200_000,
+  });
+  const older = model({ provider: "openai", id: "gpt-5.5" });
+
+  userSwitchesTo(claude);
+  const originalHandler = handlers.get("model_select");
+  handlers.set("model_select", async (event, c) => {
+    const result = await originalHandler?.(event, c);
+    if ((event as { model?: Model<Api> }).model === claude)
+      userSwitchesTo(older);
+    return result;
+  });
+  await handlers.get("session_start")?.({}, ctx);
+
+  assert.equal(ctx.model, older, "the last model the user picked stays");
+  assert.equal(older.contextWindow, 272_000);
+  assert.equal(claude.contextWindow, 200_000);
+  assert.equal(registryModel.contextWindow, 272_000);
+});
+
+test("toggling again while the raise is still in flight turns it off", async () => {
+  const {
+    commandHandler,
+    ctx,
+    handlers,
+    notifications,
+    registryModel,
+    statuses,
+    userTogglesLongContext,
+  } = extensionHarness(undefined);
+
+  userTogglesLongContext();
+  await commandHandler("", ctx);
+
+  assert.equal(ctx.model.contextWindow, 272_000, "two toggles cancel out");
+  assert.equal(registryModel.contextWindow, 272_000);
+  assert.notEqual(statuses.at(-1), "\u26a0");
+  assert.deepEqual(
+    notifications.filter((n) => n.includes("only applies")),
+    [],
+    "a busy raise is not an unsupported model",
+  );
+
+  await handlers.get("before_agent_start")?.({}, ctx);
+  assert.equal(ctx.model.contextWindow, 272_000, "and it stays off");
+
+  await commandHandler("", ctx);
+  assert.equal(
+    ctx.model.contextWindow,
+    MAX_CONTEXT_WINDOW,
+    "a clean toggle still works after",
+  );
 });
 
 test("an automatic compaction repairs a detached copy and is cancelled", async () => {
