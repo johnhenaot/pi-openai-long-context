@@ -56,7 +56,7 @@ Past 272K input tokens, OpenAI bills the **whole request** at its long-context r
 
 ## Supported models and providers
 
-`gpt-5.6-*` and `gpt-6-*` on the `openai` and `openai-codex` providers. Other providers can be explicitly enabled with `additionalProviders` in `openai-long-context.json`; providers not listed there are left untouched.
+`gpt-5.6-*` and `gpt-6-*` (including namespaced IDs such as `openai/gpt-5.6-*`) on the `openai` and `openai-codex` providers. Other providers can be explicitly enabled with `additionalProviders` in `openai-long-context.json`; providers not listed there are left untouched.
 
 To use an equivalent model through another provider, add its provider name to `~/.pi/agent/openai-long-context.json`:
 

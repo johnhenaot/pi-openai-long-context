@@ -18,7 +18,7 @@ const SUBAGENT_RUNNER_MARKER = "PI_SUBAGENT_CHILD";
 
 const KEEP_LONG_CONTEXT = "Keep long context";
 
-const SUPPORTED_MODEL_ID = /^gpt-(?:5\.6|6)-/;
+const SUPPORTED_MODEL_ID = /^(?:[^/]+\/)?gpt-(?:5\.6|6)-/;
 
 const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
 
@@ -34,7 +34,9 @@ export function isTarget(
   );
 }
 
-export function createLongContext(additionalProviders: readonly string[] = []) {
+export function createLongContext(
+  getAdditionalProviders: () => readonly string[] = () => [],
+) {
   let armed: { model: Model<Api>; previousContextWindow: number } | undefined;
 
   return {
@@ -43,7 +45,7 @@ export function createLongContext(additionalProviders: readonly string[] = []) {
     },
 
     enable(model: Model<Api> | undefined): boolean {
-      if (armed !== undefined || !isTarget(model, additionalProviders))
+      if (armed !== undefined || !isTarget(model, getAdditionalProviders()))
         return false;
 
       armed = { model, previousContextWindow: model.contextWindow };
@@ -95,8 +97,8 @@ function getAdditionalProviders(config: LongContextConfig): string[] {
 }
 
 export default function openaiLongContext(pi: ExtensionAPI): void {
-  const additionalProviders: string[] = [];
-  const longContext = createLongContext(additionalProviders);
+  let additionalProviders: string[] = [];
+  const longContext = createLongContext(() => additionalProviders);
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
   let autoEnabled = false;
@@ -209,11 +211,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     const config = await readConfig();
-    additionalProviders.splice(
-      0,
-      additionalProviders.length,
-      ...getAdditionalProviders(config),
-    );
+    additionalProviders = getAdditionalProviders(config);
     hideFromMenuUnlessTargeted(ctx);
     const key = isSubagentRunnerProcess()
       ? "autoEnableSubagents"
@@ -287,7 +285,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       if (raiseCancelled) return;
       if (raised === undefined) {
         ctx.ui.notify(
-          `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on supported providers. Switch to one first.`,
+          `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on openai, openai-codex, or configured additionalProviders. Switch to one first.`,
           "warning",
         );
         return;

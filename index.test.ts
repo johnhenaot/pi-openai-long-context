@@ -114,6 +114,29 @@ describe("isTarget", () => {
       ]),
     );
   });
+
+  test("accepts namespaced model IDs from catalog providers", () => {
+    assert.ok(
+      isTarget(model({ provider: "openrouter", id: "openai/gpt-6-astra" }), [
+        "openrouter",
+      ]),
+    );
+    assert.ok(
+      isTarget(model({ provider: "openrouter", id: "openai/gpt-5.6-sol" }), [
+        "openrouter",
+      ]),
+    );
+    assert.ok(
+      !isTarget(model({ provider: "openrouter", id: "openai/gpt-5.5" }), [
+        "openrouter",
+      ]),
+    );
+    assert.ok(
+      !isTarget(model({ provider: "openrouter", id: "openai/gpt-6.1-astra" }), [
+        "openrouter",
+      ]),
+    );
+  });
 });
 
 test("enabling raises the window, resetting restores the real built-in", () => {
@@ -335,7 +358,21 @@ describe("additionalProviders", () => {
     await commandHandler("", ctx);
 
     assert.equal(ctx.model.contextWindow, 272_000);
-    assert.match(notifications.at(-1) ?? "", /only applies/);
+    assert.match(
+      notifications.at(-1) ?? "",
+      /only applies to GPT-5\.6 \/ GPT-6 models on openai, openai-codex, or configured additionalProviders/,
+    );
+  });
+
+  test("a configured provider toggles with a namespaced model ID", async () => {
+    config('{"additionalProviders":["openrouter"]}');
+    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+    ctx.model = model({ provider: "openrouter", id: "openai/gpt-5.6-sol" });
+    await handlers.get("session_start")?.({}, ctx);
+
+    await commandHandler("", ctx);
+
+    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
   });
 
   test("a configured provider toggles like openai", async () => {
