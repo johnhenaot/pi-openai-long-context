@@ -24,7 +24,7 @@ Run it again to turn it off. A `⚠` in the footer means it is on. The command o
 
 ## Turn it on for good
 
-Create `~/.pi/agent/openai-long-context.json` (or the same file in your `PI_CODING_AGENT_DIR`):
+Create/edit `~/.pi/agent/openai-long-context.json` (or the same file in your `PI_CODING_AGENT_DIR`):
 
 ```json
 {
@@ -58,17 +58,15 @@ Past 272K input tokens, OpenAI bills the **whole request** at its long-context r
 
 `gpt-5.6-*` and `gpt-6-*` on the `openai` and `openai-codex` providers. Other providers can be explicitly enabled with `additionalProviders` in `openai-long-context.json`; providers not listed there are left untouched.
 
-To use an equivalent model through another provider, add its provider name to the same config file:
+To use an equivalent model through another provider, add its provider name to `~/.pi/agent/openai-long-context.json`:
 
 ```json
 {
-  "additionalProviders": ["openrouter"],
-  "autoEnable": true,
-  "autoEnableSubagents": true
+  "additionalProviders": ["openrouter"]
 }
 ```
 
-This applies to manual toggles, the command menu, and sessions opted in with either auto-enable flag. Omit the auto-enable flags if you only want manual toggles. Only add providers whose GPT-5.6 or GPT-6 model documents a context window of at least 1.05M tokens.
+This applies to manual toggles, the command menu, and sessions opted in with either auto-enable flag. Only add providers whose GPT-5.6 or GPT-6 model documents a context window of at least 1.05M tokens.
 
 1.05M is the documented maximum for GPT-5.6 and [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra). Future `gpt-6-*` models match automatically, but their real limits are not checked here; look up a new model's context window before trusting it.
 
