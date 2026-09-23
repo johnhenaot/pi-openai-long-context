@@ -211,7 +211,11 @@ type AutocompleteFactory = Parameters<
   ExtensionUIContext["addAutocompleteProvider"]
 >[0];
 
-function extensionHarness(choice: string | undefined, hasUI = true) {
+function extensionHarness(
+  choice: string | undefined,
+  hasUI = true,
+  setModelResult?: () => boolean | Promise<boolean>,
+) {
   const handlers = new Map<string, Handler>();
   const autocompleteFactories: AutocompleteFactory[] = [];
   let commandHandler: Handler | undefined;
@@ -268,6 +272,7 @@ function extensionHarness(choice: string | undefined, hasUI = true) {
       commandHandler = command.handler;
     },
     setModel: async (selected: Model<Api>) => {
+      if (setModelResult && !(await setModelResult())) return false;
       await whilePiIsSettingAModel?.();
       ctx.model = selected;
       thinkingLevel = THINKING_LEVEL_PI_APPLIES_ON_MODEL_CHANGE;
@@ -795,6 +800,29 @@ test("toggling again while the raise is still in flight turns it off", async () 
   );
 });
 
+test("failed and thrown model selections leave a later manual raise available", async () => {
+  for (const failure of ["false", "throw"] as const) {
+    let attempts = 0;
+    const { commandHandler, ctx, registryModel } = extensionHarness(
+      undefined,
+      true,
+      () => {
+        if (attempts++ > 0) return true;
+        if (failure === "throw") throw new Error("setModel failed");
+        return false;
+      },
+    );
+    if (failure === "throw")
+      await assert.rejects(async () => {
+        await commandHandler("", ctx);
+      }, /setModel failed/);
+    else await commandHandler("", ctx);
+    assert.equal(ctx.model, registryModel);
+    await commandHandler("", ctx);
+    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW, failure);
+  }
+});
+
 test("an automatic compaction repairs a detached copy and is cancelled", async () => {
   writeFileSync(
     join(testAgentDir, "openai-long-context.json"),
@@ -1037,6 +1065,42 @@ test("the menu shows long context for GPT-6 and hides it for unsupported models"
     prefix: "/",
     items,
   });
+});
+
+test("repeated session starts install one menu filter and preserve autocomplete this", async () => {
+  const { ctx, handlers, autocompleteFactories } = extensionHarness(undefined);
+  await handlers.get("session_start")?.({}, ctx);
+  await handlers.get("session_start")?.({}, ctx);
+  assert.equal(autocompleteFactories.length, 1);
+
+  const current = {
+    suffix: "preserved",
+    getSuggestions: async () => null,
+    applyCompletion(
+      this: { suffix: string },
+      lines: string[],
+      cursorLine: number,
+      cursorCol: number,
+    ) {
+      return { lines: [...lines, this.suffix], cursorLine, cursorCol };
+    },
+  };
+  const provider = autocompleteFactories[0]?.(current);
+  assert.ok(provider);
+  assert.deepEqual(
+    provider.applyCompletion(
+      ["/"],
+      0,
+      1,
+      { value: "long-context", label: "long-context" },
+      "/",
+    ),
+    {
+      lines: ["/", "preserved"],
+      cursorLine: 0,
+      cursorCol: 1,
+    },
+  );
 });
 
 test("GPT-6 toggles to 1.05M and restores its previous window on toggle, switch, and shutdown", async () => {
