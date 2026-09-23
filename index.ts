@@ -12,10 +12,6 @@ export const MAX_CONTEXT_WINDOW = 1_050_000;
 
 export const COMMAND_NAME = "long-context";
 
-const CONFIG_FILE = "openai-long-context.json";
-
-const SUBAGENT_RUNNER_MARKER = "PI_SUBAGENT_CHILD";
-
 const KEEP_LONG_CONTEXT = "Keep long context";
 
 const SUPPORTED_MODEL_ID = /^(?:[^/]+\/)?gpt-(?:5\.6|6)-/;
@@ -63,10 +59,6 @@ export function createLongContext(
   };
 }
 
-function isSubagentRunnerProcess(): boolean {
-  return process.env[SUBAGENT_RUNNER_MARKER] === "1";
-}
-
 type LongContextConfig = {
   autoEnable?: boolean;
   autoEnableSubagents?: boolean;
@@ -75,25 +67,14 @@ type LongContextConfig = {
 
 async function readConfig(): Promise<LongContextConfig> {
   try {
-    const config = JSON.parse(
-      await readFile(join(getAgentDir(), CONFIG_FILE), "utf8"),
+    return (
+      JSON.parse(
+        await readFile(join(getAgentDir(), "openai-long-context.json"), "utf8"),
+      ) ?? {}
     );
-    return config !== null &&
-      typeof config === "object" &&
-      !Array.isArray(config)
-      ? config
-      : {};
   } catch {
     return {};
   }
-}
-
-function getAdditionalProviders(config: LongContextConfig): string[] {
-  return Array.isArray(config.additionalProviders)
-    ? config.additionalProviders.filter(
-        (provider): provider is string => typeof provider === "string",
-      )
-    : [];
 }
 
 export default function openaiLongContext(pi: ExtensionAPI): void {
@@ -102,7 +83,6 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
   let autoEnabled = false;
-  let raisingWindow = false;
   let modelBeingSet: Model<Api> | undefined;
   let raiseInterruptedBy: Model<Api> | undefined;
   let raiseCancelled = false;
@@ -111,68 +91,34 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     ui.setStatus(COMMAND_NAME, on ? ui.theme.fg("warning", "⚠") : undefined);
   };
 
-  const hideFromMenuUnlessTargeted = (ctx: ExtensionContext): void => {
-    if (hiddenFromMenu || ctx.mode !== "tui") return;
-    hiddenFromMenu = true;
-
-    ctx.ui.addAutocompleteProvider((current) => ({
-      ...current,
-      async getSuggestions(lines, cursorLine, cursorCol, options) {
-        const suggestions = await current.getSuggestions(
-          lines,
-          cursorLine,
-          cursorCol,
-          options,
-        );
-        if (suggestions === null || isTarget(ctx.model, additionalProviders))
-          return suggestions;
-
-        const items = suggestions.items.filter(
-          (item) => item.value !== COMMAND_NAME,
-        );
-        return items.length === 0 ? null : { ...suggestions, items };
-      },
-      applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
-        current.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
-      shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
-        current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ??
-        false,
-    }));
-  };
-
   const releaseRaisedWindow = (ctx: ExtensionContext): boolean => {
     if (!longContext.reset()) return false;
     setMarker(ctx.ui, false);
     return true;
   };
 
-  const setModelUntilTheUserStopsSwitching = async (
-    model: Model<Api>,
-  ): Promise<boolean> => {
-    let next: Model<Api> | undefined = model;
-    while (next !== undefined) {
-      modelBeingSet = next;
-      raiseInterruptedBy = undefined;
-      if (!(await pi.setModel(next))) return false;
-      next = raiseInterruptedBy;
-    }
-    return true;
-  };
-
   const raiseWindowOnPrivateCopy = async (
     ctx: ExtensionContext,
   ): Promise<Model<Api> | undefined> => {
-    if (raisingWindow || !isTarget(ctx.model, additionalProviders))
+    if (
+      modelBeingSet !== undefined ||
+      !isTarget(ctx.model, additionalProviders)
+    )
       return undefined;
 
-    raisingWindow = true;
+    modelBeingSet = ctx.model;
     raiseCancelled = false;
     const privateCopy = { ...ctx.model };
     const requestedThinkingLevel = pi.getThinkingLevel();
     let interrupted = false;
     try {
-      if (!(await setModelUntilTheUserStopsSwitching(privateCopy)))
-        return undefined;
+      let next: Model<Api> | undefined = privateCopy;
+      while (next !== undefined) {
+        modelBeingSet = next;
+        raiseInterruptedBy = undefined;
+        if (!(await pi.setModel(next))) return undefined;
+        next = raiseInterruptedBy;
+      }
       interrupted = modelBeingSet !== privateCopy || raiseCancelled;
       if (interrupted) return undefined;
       pi.setThinkingLevel(requestedThinkingLevel);
@@ -180,21 +126,20 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       setMarker(ctx.ui, true);
       return privateCopy;
     } finally {
-      raisingWindow = false;
       modelBeingSet = undefined;
       raiseInterruptedBy = undefined;
       if (interrupted && !raiseCancelled) await raiseWindowWhenAutoEnabled(ctx);
     }
   };
 
-  const raisedCopyDetachedFromSession = (ctx: ExtensionContext): boolean =>
-    longContext.armedModel !== undefined &&
-    longContext.armedModel !== ctx.model;
-
   const reattachRaisedWindow = async (
     ctx: ExtensionContext,
   ): Promise<boolean> => {
-    if (!raisedCopyDetachedFromSession(ctx)) return false;
+    if (
+      longContext.armedModel === undefined ||
+      longContext.armedModel === ctx.model
+    )
+      return false;
     releaseRaisedWindow(ctx);
     return (await raiseWindowOnPrivateCopy(ctx)) !== undefined;
   };
@@ -206,22 +151,48 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     await raiseWindowOnPrivateCopy(ctx);
   };
 
-  const startsNewTurn = (event: { streamingBehavior?: unknown }): boolean =>
-    event.streamingBehavior === undefined;
-
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     const config = await readConfig();
-    additionalProviders = getAdditionalProviders(config);
-    hideFromMenuUnlessTargeted(ctx);
-    const key = isSubagentRunnerProcess()
-      ? "autoEnableSubagents"
-      : "autoEnable";
+    additionalProviders = Array.isArray(config.additionalProviders)
+      ? config.additionalProviders.filter(
+          (provider): provider is string => typeof provider === "string",
+        )
+      : [];
+    if (!hiddenFromMenu && ctx.mode === "tui") {
+      hiddenFromMenu = true;
+      ctx.ui.addAutocompleteProvider((current) => ({
+        ...current,
+        async getSuggestions(lines, cursorLine, cursorCol, options) {
+          const suggestions = await current.getSuggestions(
+            lines,
+            cursorLine,
+            cursorCol,
+            options,
+          );
+          if (suggestions === null || isTarget(ctx.model, additionalProviders))
+            return suggestions;
+
+          const items = suggestions.items.filter(
+            (item) => item.value !== COMMAND_NAME,
+          );
+          return items.length === 0 ? null : { ...suggestions, items };
+        },
+        applyCompletion: current.applyCompletion.bind(current),
+        shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
+          current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ??
+          false,
+      }));
+    }
+    const key =
+      process.env.PI_SUBAGENT_CHILD === "1"
+        ? "autoEnableSubagents"
+        : "autoEnable";
     autoEnabled = config[key] === true;
     await raiseWindowWhenAutoEnabled(ctx);
   });
 
   pi.on("input", async (event, ctx: ExtensionContext) => {
-    if (startsNewTurn(event)) await reattachRaisedWindow(ctx);
+    if (event.streamingBehavior === undefined) await reattachRaisedWindow(ctx);
   });
 
   pi.on("before_agent_start", async (_event, ctx: ExtensionContext) => {
@@ -229,15 +200,10 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
     await reattachRaisedWindow(ctx);
   });
 
-  const compactionContinuesAnInterruptedTurn = (event: {
-    reason: string;
-    willRetry?: boolean;
-  }): boolean => event.reason === "overflow" && event.willRetry === true;
-
   pi.on("session_before_compact", async (event, ctx) => {
     if (event.reason === "manual") return;
     if (await reattachRaisedWindow(ctx))
-      return compactionContinuesAnInterruptedTurn(event)
+      return event.reason === "overflow" && event.willRetry === true
         ? undefined
         : { cancel: true };
     if (ctx.model !== warnBeforeAutoCompaction || !ctx.hasUI) return;
@@ -255,9 +221,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
 
   pi.on("model_select", async (event, ctx: ExtensionContext) => {
     warnBeforeAutoCompaction = undefined;
-    if (raisingWindow) {
-      const chosen = event.model ?? ctx.model;
-      if (chosen !== modelBeingSet) raiseInterruptedBy = chosen;
+    if (modelBeingSet !== undefined) {
+      if (event.model !== modelBeingSet) raiseInterruptedBy = event.model;
       return;
     }
     releaseRaisedWindow(ctx);
@@ -271,7 +236,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   pi.registerCommand(COMMAND_NAME, {
     description: `Raise the GPT-5.6 / GPT-6 context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
     handler: async (_args, ctx) => {
-      if (raisingWindow) {
+      if (modelBeingSet !== undefined) {
         raiseCancelled = true;
         raiseInterruptedBy = ctx.model;
         return;
