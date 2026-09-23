@@ -4,7 +4,7 @@ Raise GPT-5.6 and GPT-6 models from pi's **272K** context window to **1.05M**.
 
 It is off until you ask for it, because [it costs more](#what-it-costs).
 
-https://github.com/user-attachments/assets/689360eb-6e11-47a2-930c-c6741ec232c6
+https://github.com/user-attachments/assets/6844778e-da8f-4892-b9c9-05ed09f00190
 
 ## Install
 
