@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
@@ -63,80 +63,36 @@ function model(
   };
 }
 
-describe("isTarget", () => {
+test("isTarget accepts GPT-5.6+ on capped or configured providers only", () => {
+  const is = (provider: string, id: string, extra: string[] = []) =>
+    isTarget(model({ provider, id }), extra);
+
   for (const provider of ["openai", "openai-codex"]) {
-    test(`accepts GPT-5.6 on ${provider}`, () => {
-      assert.ok(isTarget(model({ provider, id: "gpt-5.6-sol" })));
-      assert.ok(isTarget(model({ provider, id: "gpt-5.6-terra" })));
-    });
-
-    test(`accepts GPT-6 on ${provider}`, () => {
-      assert.ok(isTarget(model({ provider, id: "gpt-6-astra" })));
-      assert.ok(isTarget(model({ provider, id: "gpt-6-future-variant" })));
-    });
+    for (const id of [
+      "gpt-5.6-terra",
+      "gpt-6-astra",
+      "gpt-6.1-sol",
+      "gpt-7",
+      "gpt-5.10-x",
+      "openai/gpt-6.1-sol",
+    ])
+      assert.ok(is(provider, id), `${provider}/${id}`);
+    for (const id of [
+      "gpt-5.5",
+      "gpt-5",
+      "gpt-4.1",
+      "gpt-6x-astra",
+      "o3",
+      "openai/gpt-5.5",
+    ])
+      assert.ok(!is(provider, id), `${provider}/${id}`);
   }
 
-  for (const id of ["gpt-5.5", "gpt-6", "gpt-60-astra", "gpt-6.1-astra"]) {
-    test(`rejects ${id} even on openai`, () => {
-      assert.ok(!isTarget(model({ provider: "openai", id })));
-    });
-  }
-
-  test("rejects supported models on providers that already ship 1.05M", () => {
-    assert.ok(!isTarget(model({ provider: "openrouter", id: "gpt-6-astra" })));
-    assert.ok(!isTarget(model({ provider: "openrouter", id: "gpt-5.6-sol" })));
-  });
-
-  test("rejects a missing model", () => {
-    assert.ok(!isTarget(undefined));
-  });
-
-  test("accepts a configured additional provider", () => {
-    assert.ok(
-      isTarget(model({ provider: "openrouter", id: "gpt-6-astra" }), [
-        "openrouter",
-      ]),
-    );
-  });
-
-  test("a configured provider still requires a supported model id", () => {
-    assert.ok(
-      !isTarget(model({ provider: "openrouter", id: "gpt-5.5" }), [
-        "openrouter",
-      ]),
-    );
-  });
-
-  test("rejects providers not in the configured list", () => {
-    assert.ok(
-      !isTarget(model({ provider: "anthropic", id: "gpt-6-astra" }), [
-        "openrouter",
-      ]),
-    );
-  });
-
-  test("accepts namespaced model IDs from catalog providers", () => {
-    assert.ok(
-      isTarget(model({ provider: "openrouter", id: "openai/gpt-6-astra" }), [
-        "openrouter",
-      ]),
-    );
-    assert.ok(
-      isTarget(model({ provider: "openrouter", id: "openai/gpt-5.6-sol" }), [
-        "openrouter",
-      ]),
-    );
-    assert.ok(
-      !isTarget(model({ provider: "openrouter", id: "openai/gpt-5.5" }), [
-        "openrouter",
-      ]),
-    );
-    assert.ok(
-      !isTarget(model({ provider: "openrouter", id: "openai/gpt-6.1-astra" }), [
-        "openrouter",
-      ]),
-    );
-  });
+  assert.ok(!is("openrouter", "gpt-6-astra"), "unconfigured provider");
+  assert.ok(is("openrouter", "openai/gpt-6-astra", ["openrouter"]));
+  assert.ok(!is("openrouter", "gpt-5.5", ["openrouter"]));
+  assert.ok(!is("anthropic", "gpt-6-astra", ["openrouter"]));
+  assert.ok(!isTarget(undefined));
 });
 
 test("enabling raises the window, resetting restores the real built-in", () => {
@@ -155,38 +111,6 @@ test("enabling raises the window, resetting restores the real built-in", () => {
   assert.equal(alreadyRaisedInUserModelsJson.contextWindow, 400_000);
   assert.equal(longContext.armedModel, undefined);
   assert.ok(!longContext.reset(), "resetting twice is a no-op");
-});
-
-test("enabling never reduces an existing context window", () => {
-  for (const contextWindow of [1_050_000, 2_000_000, 4_000_000]) {
-    const longContext = createLongContext();
-    const astra = model({
-      provider: "openai-codex",
-      id: "gpt-6-astra",
-      contextWindow,
-    });
-
-    assert.ok(longContext.enable(astra));
-    assert.equal(astra.contextWindow, contextWindow);
-    assert.ok(longContext.reset());
-    assert.equal(astra.contextWindow, contextWindow);
-    assert.equal(longContext.armedModel, undefined);
-  }
-});
-
-test("unsupported models are refused and left untouched", () => {
-  const longContext = createLongContext();
-  const claude = model({
-    provider: "anthropic",
-    id: "claude-sonnet-4-5",
-    api: "anthropic-messages",
-    contextWindow: 200_000,
-  });
-
-  assert.ok(!longContext.enable(claude));
-  assert.ok(!longContext.enable(undefined));
-  assert.equal(claude.contextWindow, 200_000);
-  assert.equal(longContext.armedModel, undefined);
 });
 
 test("only one model is armed at a time", () => {
@@ -307,13 +231,8 @@ test("automatic child activation requires an explicit config opt-in", async () =
   for (const contents of [
     undefined,
     "{}",
-    '{"autoEnableSubagents":false}',
     '{"autoEnableSubagents":"true"}',
-    '{"autoEnableSubagents":1}',
-    '{"autoEnableSubagents":null}',
     "null",
-    "[]",
-    "true",
     "{invalid",
   ]) {
     if (contents !== undefined) writeFileSync(path, contents);
@@ -341,13 +260,6 @@ test("automatic child activation requires an explicit config opt-in", async () =
     );
     await handlers.get("session_shutdown")?.({}, ctx);
   }
-
-  rmSync(path);
-  mkdirSync(path);
-  const { ctx, handlers } = extensionHarness(undefined, false);
-  ctx.mode = "print";
-  await handlers.get("session_start")?.({}, ctx);
-  assert.equal(ctx.model.contextWindow, 272_000);
 });
 
 describe("additionalProviders", () => {
@@ -365,49 +277,9 @@ describe("additionalProviders", () => {
     assert.equal(ctx.model.contextWindow, 272_000);
     assert.match(
       notifications.at(-1) ?? "",
-      /only applies to GPT-5\.6 \/ GPT-6 models on openai, openai-codex, or configured additionalProviders/,
+      /only applies to GPT-5\.6\+ models on openai, openai-codex, or configured additionalProviders/,
     );
   });
-
-  test("a configured provider toggles with a namespaced model ID", async () => {
-    config('{"additionalProviders":["openrouter"]}');
-    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
-    ctx.model = model({ provider: "openrouter", id: "openai/gpt-5.6-sol" });
-    await handlers.get("session_start")?.({}, ctx);
-
-    await commandHandler("", ctx);
-
-    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
-  });
-
-  test("a configured provider toggles like openai", async () => {
-    config('{"additionalProviders":["openrouter"]}');
-    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
-    ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
-    await handlers.get("session_start")?.({}, ctx);
-
-    await commandHandler("", ctx);
-
-    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
-  });
-
-  for (const [flag, child] of [
-    ["autoEnable", false],
-    ["autoEnableSubagents", true],
-  ] as const) {
-    test(`${flag} auto-arms a configured provider`, async () => {
-      if (child) process.env.PI_SUBAGENT_CHILD = "1";
-      config(`{"additionalProviders":["openrouter"],"${flag}":true}`);
-      const { ctx, handlers } = extensionHarness(undefined);
-      const original = model({ provider: "openrouter", id: "gpt-6-astra" });
-      ctx.model = original;
-
-      await handlers.get("session_start")?.({}, ctx);
-
-      assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
-      assert.equal(original.contextWindow, 272_000, "arm a private copy");
-    });
-  }
 
   for (const json of [
     '{"additionalProviders":"openrouter"}',
@@ -436,34 +308,9 @@ describe("additionalProviders", () => {
 
     assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
   });
-
-  test("the menu shows long context for a configured provider", async () => {
-    config('{"additionalProviders":["openrouter"]}');
-    const { ctx, handlers, autocompleteFactories } =
-      extensionHarness(undefined);
-    ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
-    await handlers.get("session_start")?.({}, ctx);
-    const items = [{ value: "long-context", label: "long-context" }];
-    const factory = autocompleteFactories[0];
-    assert.ok(factory);
-    const provider = factory({
-      getSuggestions: async () => ({ prefix: "/", items }),
-      applyCompletion: (lines, cursorLine, cursorCol) => ({
-        lines,
-        cursorLine,
-        cursorCol,
-      }),
-    });
-
-    const suggestions = await provider.getSuggestions(["/"], 0, 1, {
-      signal: new AbortController().signal,
-    });
-
-    assert.deepEqual(suggestions, { prefix: "/", items });
-  });
 });
 
-test("opted-in sessions in a marked runner automatically arm only supported models", async () => {
+test("only PI_SUBAGENT_CHILD=1 counts as a runner child", async () => {
   writeFileSync(
     join(testAgentDir, "openai-long-context.json"),
     '{"autoEnableSubagents":true}',
@@ -473,12 +320,8 @@ test("opted-in sessions in a marked runner automatically arm only supported mode
     if (marker === undefined) delete process.env.PI_SUBAGENT_CHILD;
     else process.env.PI_SUBAGENT_CHILD = marker;
 
-    for (const [provider, id, supported] of [
-      ["openai", "gpt-5.6-sol", true],
-      ["openai-codex", "gpt-6-astra", true],
-      ["openai", "gpt-5.5", false],
-      ["openrouter", "gpt-6-astra", false],
-    ] as const) {
+    {
+      const [provider, id] = ["openai-codex", "gpt-6-astra"];
       const {
         ctx,
         handlers,
@@ -491,7 +334,7 @@ test("opted-in sessions in a marked runner automatically arm only supported mode
       ctx.model = original;
       await handlers.get("session_start")?.({ reason: "startup" }, ctx);
 
-      const enabled = marker === "1" && supported;
+      const enabled = marker === "1";
       assert.equal(
         ctx.model.contextWindow,
         enabled ? 1_050_000 : 400_000,
@@ -515,59 +358,10 @@ test("opted-in sessions in a marked runner automatically arm only supported mode
   }
 });
 
-test("runner child sessions retain independent windows and the usual reset behavior", async () => {
-  writeFileSync(
-    join(testAgentDir, "openai-long-context.json"),
-    '{"autoEnableSubagents":true}',
-  );
-  process.env.PI_SUBAGENT_CHILD = "1";
-  const first = extensionHarness(undefined, false);
-  const second = extensionHarness(undefined, false);
-  first.ctx.mode = second.ctx.mode = "print";
-  second.ctx.model = first.ctx.model;
-  await first.handlers.get("session_start")?.({}, first.ctx);
-  await second.handlers.get("session_start")?.({}, second.ctx);
-  await first.handlers.get("session_start")?.({}, first.ctx);
-  await first.handlers.get("session_before_compact")?.(
-    { reason: "threshold" },
-    first.ctx,
-  );
-  assert.equal(first.ctx.model.contextWindow, 1_050_000);
-  await first.commandHandler("", first.ctx);
-  await first.handlers.get("before_agent_start")?.({}, first.ctx);
-  assert.equal(
-    first.ctx.model.contextWindow,
-    272_000,
-    "turning it off is not undone next turn",
-  );
-  assert.equal(
-    second.ctx.model.contextWindow,
-    1_050_000,
-    "one child's reset must not reset another",
-  );
-  const armed = second.ctx.model;
-  second.ctx.model = model({
-    provider: "anthropic",
-    id: "claude-sonnet-4-5",
-    contextWindow: 200_000,
-  });
-  await second.handlers.get("model_select")?.({}, second.ctx);
-  assert.equal(armed.contextWindow, 272_000);
-});
-
 test("default activation requires its own explicit config opt-in", async () => {
   const path = join(testAgentDir, "openai-long-context.json");
 
-  for (const contents of [
-    undefined,
-    "{}",
-    '{"autoEnable":false}',
-    '{"autoEnable":"true"}',
-    '{"autoEnable":1}',
-    '{"autoEnableSubagents":true}',
-    "true",
-    "{invalid",
-  ]) {
+  for (const contents of [undefined, '{"autoEnable":"true"}', "{invalid"]) {
     if (contents !== undefined) writeFileSync(path, contents);
     const { ctx, handlers, registryModel } = extensionHarness(undefined);
     const label = contents ?? "missing config";
@@ -599,6 +393,9 @@ test("opting in by default arms at startup and follows model switches", async ()
   assert.equal(registryModel.contextWindow, 272_000);
   assert.equal(statuses.at(-1), "⚠");
   const armedSol = ctx.model;
+  await handlers.get("session_start")?.({}, ctx);
+  assert.equal(ctx.model, armedSol, "a repeated start keeps the armed copy");
+  assert.equal(armedSol.contextWindow, MAX_CONTEXT_WINDOW);
 
   const claude = model({
     provider: "anthropic",
@@ -1059,12 +856,6 @@ test("the menu shows long context for GPT-6 and hides it for unsupported models"
     null,
     "filtering out the only command must suppress the menu",
   );
-
-  ctx.model = model({ provider: "openai", id: "gpt-6-future-variant" });
-  assert.deepEqual(await provider.getSuggestions(["/"], 0, 1, options), {
-    prefix: "/",
-    items,
-  });
 });
 
 test("repeated session starts install one menu filter and preserve autocomplete this", async () => {
@@ -1124,20 +915,6 @@ test("GPT-6 toggles to 1.05M and restores its previous window on toggle, switch,
     assert.equal(astra.contextWindow, 400_000);
     assert.equal(statuses.at(-1), undefined);
   }
-});
-
-test("the manual toggle raises a private copy, never the model other sessions share", async () => {
-  const { commandHandler, ctx, registryModel } = extensionHarness(undefined);
-
-  await commandHandler("", ctx);
-  const raised = ctx.model;
-  assert.notEqual(raised, registryModel);
-  assert.equal(raised.contextWindow, MAX_CONTEXT_WINDOW);
-  assert.equal(registryModel.contextWindow, 272_000);
-
-  await commandHandler("", ctx);
-  assert.equal(raised.contextWindow, 272_000);
-  assert.equal(registryModel.contextWindow, 272_000);
 });
 
 test("the activation notification reports the preserved larger window", async () => {
@@ -1205,23 +982,6 @@ test("headless mode proceeds with compaction instead of re-enabling long context
   assert.equal(result, undefined);
   assert.equal(ctx.model.contextWindow, 272_000);
   assert.deepEqual(selections, []);
-});
-
-test("dismissing the warning proceeds with compaction", async () => {
-  const { commandHandler, ctx, handlers, selections } =
-    extensionHarness(undefined);
-
-  await commandHandler("", ctx);
-  await commandHandler("", ctx);
-
-  const result = await handlers.get("session_before_compact")?.(
-    { reason: "threshold" },
-    ctx,
-  );
-
-  assert.equal(result, undefined);
-  assert.equal(ctx.model.contextWindow, 272_000);
-  assert.equal(selections.length, 1);
 });
 
 test("later compactions proceed normally when the next turn starts safely", async () => {

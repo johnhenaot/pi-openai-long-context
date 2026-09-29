@@ -1,6 +1,6 @@
 # pi-openai-long-context
 
-Raise GPT-5.6 and GPT-6 models from pi's **272K** context window to **1.05M**.
+Raise GPT-5.6+ models from pi's **272K** context window to **1.05M**.
 
 It is off until you ask for it, because [it costs more](#what-it-costs).
 
@@ -56,7 +56,7 @@ Past 272K input tokens, OpenAI bills the **whole request** at its long-context r
 
 ## Supported models and providers
 
-`gpt-5.6-*` and `gpt-6-*` (including namespaced IDs such as `openai/gpt-5.6-*`) on the `openai` and `openai-codex` providers. Other providers can be explicitly enabled with `additionalProviders` in `openai-long-context.json`; providers not listed there are left untouched.
+Any GPT model from 5.6 onward — `gpt-5.6-*`, `gpt-6-*`, `gpt-6.1-*`, and later versions (including namespaced IDs such as `openai/gpt-5.6-*`) — on the `openai` and `openai-codex` providers. Other providers can be explicitly enabled with `additionalProviders` in `openai-long-context.json`; providers not listed there are left untouched.
 
 To use an equivalent model through another provider, add its provider name to `~/.pi/agent/openai-long-context.json`:
 
@@ -66,9 +66,9 @@ To use an equivalent model through another provider, add its provider name to `~
 }
 ```
 
-This applies to manual toggles, the command menu, and sessions opted in with either auto-enable flag. Only add providers whose GPT-5.6 or GPT-6 model documents a context window of at least 1.05M tokens.
+This applies to manual toggles, the command menu, and sessions opted in with either auto-enable flag. Only add providers whose GPT-5.6+ model documents a context window of at least 1.05M tokens.
 
-1.05M is the documented maximum for GPT-5.6 and [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra). Future `gpt-6-*` models match automatically, but their real limits are not checked here; look up a new model's context window before trusting it.
+1.05M is the documented maximum for every GPT-5.6+ model OpenAI lists: GPT-5.6 Sol/Terra/Luna, GPT-6 Sol/Luna/[Astra](https://developers.openai.com/api/docs/models/gpt-6-astra), and [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol). Newer versions match automatically without a per-model check.
 
 If you set your own context window for a supported model in `models.json`, turning this off restores *your* value, not pi's.
 
