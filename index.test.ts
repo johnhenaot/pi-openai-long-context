@@ -878,6 +878,7 @@ test("repeated session starts install one menu filter and preserve autocomplete 
   };
   const provider = autocompleteFactories[0]?.(current);
   assert.ok(provider);
+  assert.equal(provider.shouldTriggerFileCompletion, undefined);
   assert.deepEqual(
     provider.applyCompletion(
       ["/"],
@@ -892,6 +893,23 @@ test("repeated session starts install one menu filter and preserve autocomplete 
       cursorCol: 1,
     },
   );
+
+  class TriggerProvider {
+    trigger: boolean;
+    constructor(trigger: boolean) {
+      this.trigger = trigger;
+    }
+    getSuggestions = current.getSuggestions;
+    applyCompletion = current.applyCompletion;
+    shouldTriggerFileCompletion() {
+      return this.trigger;
+    }
+  }
+  for (const trigger of [false, true]) {
+    const wrapped = autocompleteFactories[0]?.(new TriggerProvider(trigger));
+    assert.ok(wrapped?.shouldTriggerFileCompletion);
+    assert.equal(wrapped.shouldTriggerFileCompletion([], 0, 0), trigger);
+  }
 });
 
 test("GPT-6 toggles to 1.05M and restores its previous window on toggle, switch, and shutdown", async () => {
