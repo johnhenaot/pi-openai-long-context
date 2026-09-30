@@ -14,7 +14,13 @@ export const COMMAND_NAME = "long-context";
 
 const KEEP_LONG_CONTEXT = "Keep long context";
 
-const SUPPORTED_MODEL_ID = /^(?:[^/]+\/)?gpt-(?:5\.6|6)-/;
+// GPT-5.6 and later; every such model OpenAI documents is 1.05M.
+const GPT_VERSION = /^(?:[^/]+\/)?gpt-(\d+)(?:\.(\d+))?(?:-|$)/;
+
+function isSupportedModelId(id: string): boolean {
+  const [, major, minor = "0"] = GPT_VERSION.exec(id) ?? [];
+  return +major > 5 || (+major === 5 && +minor >= 6);
+}
 
 const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
 
@@ -26,13 +32,11 @@ export function isTarget(
     model !== undefined &&
     (CAPPED_PROVIDERS.has(model.provider) ||
       additionalProviders.includes(model.provider)) &&
-    SUPPORTED_MODEL_ID.test(model.id)
+    isSupportedModelId(model.id)
   );
 }
 
-export function createLongContext(
-  getAdditionalProviders: () => readonly string[] = () => [],
-) {
+export function createLongContext() {
   let armed: { model: Model<Api>; previousContextWindow: number } | undefined;
 
   return {
@@ -40,9 +44,8 @@ export function createLongContext(
       return armed?.model;
     },
 
-    enable(model: Model<Api> | undefined): boolean {
-      if (armed !== undefined || !isTarget(model, getAdditionalProviders()))
-        return false;
+    enable(model: Model<Api>): boolean {
+      if (armed !== undefined) return false;
 
       armed = { model, previousContextWindow: model.contextWindow };
       model.contextWindow = Math.max(model.contextWindow, MAX_CONTEXT_WINDOW);
@@ -79,7 +82,7 @@ async function readConfig(): Promise<LongContextConfig> {
 
 export default function openaiLongContext(pi: ExtensionAPI): void {
   let additionalProviders: string[] = [];
-  const longContext = createLongContext(() => additionalProviders);
+  const longContext = createLongContext();
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
   let autoEnabled = false;
@@ -178,9 +181,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
           return items.length === 0 ? null : { ...suggestions, items };
         },
         applyCompletion: current.applyCompletion.bind(current),
-        shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
-          current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ??
-          false,
+        shouldTriggerFileCompletion:
+          current.shouldTriggerFileCompletion?.bind(current),
       }));
     }
     const key =
@@ -234,7 +236,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand(COMMAND_NAME, {
-    description: `Raise the GPT-5.6 / GPT-6 context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
+    description: `Raise the GPT-5.6+ context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
     handler: async (_args, ctx) => {
       if (modelBeingSet !== undefined) {
         raiseCancelled = true;
@@ -250,7 +252,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       if (raiseCancelled) return;
       if (raised === undefined) {
         ctx.ui.notify(
-          `/${COMMAND_NAME} only applies to GPT-5.6 / GPT-6 models on openai, openai-codex, or configured additionalProviders. Switch to one first.`,
+          `/${COMMAND_NAME} only applies to GPT-5.6+ models on openai, openai-codex, or configured additionalProviders. Switch to one first.`,
           "warning",
         );
         return;
