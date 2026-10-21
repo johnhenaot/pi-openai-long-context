@@ -1,6 +1,6 @@
 # pi-openai-long-context
 
-Raise GPT-5.6+ models from pi's **272K** context window to **1.05M**.
+Raise GPT-5.6+ models to a provider/model-specific long-context target: **1.05M for OpenAI API**, or **872K for the current Codex models listed below**.
 
 It is off until you ask for it, because [it costs more](#what-it-costs).
 
@@ -46,13 +46,13 @@ To opt out, flip the flag to `false` or delete the file. The file is read when a
 
 ## It turns itself off
 
-Without the config above, long context never outlives the moment: switching models, a new session, restarting pi, `/reload` — all of it drops you back to 272K, so you cannot leave it on and be billed for it a week later. Nothing is written to your settings.
+Without the config above, long context never outlives the moment: switching models, a new session, restarting pi, `/reload` — all of it restores the previous context window (for example, 272K or 500K), so you cannot leave it on and be billed for it a week later. Nothing is written to your settings.
 
 Compaction is the exception: it keeps the big window, which is the whole point of turning it on. And if turning it *off* would immediately trigger automatic compaction, pi asks whether to compact or keep long context instead.
 
 ## What it costs
 
-Past 272K input tokens, OpenAI bills the **whole request** at its long-context rate — see [OpenAI's pricing](https://platform.openai.com/docs/pricing). On a subscription, it burns through your quota faster too. That applies to every subagent child as well, and there can be a lot of those.
+Long-context pricing and subscription quota usage depend on the model and route — see [OpenAI's pricing](https://platform.openai.com/docs/pricing) for API rates and your subscription terms for Codex. A token target here is not a billing threshold. Each subagent child can also consume long-context usage.
 
 ## Supported models and providers
 
@@ -66,11 +66,35 @@ To use an equivalent model through another provider, add its provider name to `~
 }
 ```
 
-This applies to manual toggles, the command menu, and sessions opted in with either auto-enable flag. Only add providers whose GPT-5.6+ model documents a context window of at least 1.05M tokens.
+This applies to manual toggles, the command menu, and sessions opted in with either auto-enable flag. Only add providers whose context limits you have checked. An alias is never enabled automatically, even when it has a configured token target. Opted-in `openai-codex@...` aliases and models using `openai-codex-responses` use the Codex defaults; other additional providers retain the 1.05M default. Set an exact override when a route has a different limit.
 
-1.05M is the documented maximum for every GPT-5.6+ model OpenAI lists: GPT-5.6 Sol/Terra/Luna, GPT-6 Sol/Luna/[Astra](https://developers.openai.com/api/docs/models/gpt-6-astra), and [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol). Newer versions match automatically without a per-model check.
+### Token targets
 
-If you set your own context window for a supported model in `models.json`, turning this off restores *your* value, not pi's.
+| Route | Default target |
+| --- | --- |
+| `openai` | 1,050,000 (existing GPT-5.6+ API behavior) |
+| Codex: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-6.1-sol` | 872,000 |
+| Other/future Codex models | No automatic target; configure one explicitly |
+| Other opted-in providers | 1,050,000 unless overridden |
+
+The Codex value is a snapshot reported in [Pi #11173](https://github.com/earendil-works/pi/pull/11173): the author's backend model listing returned `max_context_window: 872000`. It is **not a universal limit or a limit independently verified for your account**. Pi's catalog still supplies 272K or 500K defaults; this extension chooses a larger opt-in target. OpenAI API documentation does not establish Codex subscription limits. Newer API models still match the existing GPT-5.6+ rule; verify their limits before using them.
+
+Override an exact `provider/model-id` in `openai-long-context.json` after checking the limit for that route/account:
+
+```json
+{
+  "additionalProviders": ["openai-codex@work"],
+  "contextWindows": {
+    "openai/gpt-6.1-sol": 1050000,
+    "openai-codex/gpt-6.1-sol": 872000,
+    "openai-codex@work/gpt-6.1-sol": 872000
+  }
+}
+```
+
+Keys include the full model ID, including any namespace (for example `openrouter/openai/gpt-6.1-sol`). Values must be positive safe integers; invalid entries fall back to the defaults above. Configuration is read on session start. Overrides do not enable other providers or models outside the existing GPT-5.6+ rule.
+
+Targets only raise windows: an already larger value from `models.json` stays larger, even above these defaults or an override. Turning long context off restores the exact previous value. This is not a hard server-limit clamp. The activation notification shows the effective size. Pi uses this window for compaction and subtracts its own reserve; the extension does not change output-token limits or send a server-side context-window parameter.
 
 ## Subagent details
 
