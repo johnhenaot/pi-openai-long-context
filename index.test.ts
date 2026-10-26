@@ -22,6 +22,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import openaiLongContext, {
+  CHATGPT_CONTEXT_WINDOW,
   createLongContext,
   isTarget,
   MAX_CONTEXT_WINDOW,
@@ -65,7 +66,7 @@ function model(
 
 test("isTarget accepts GPT-5.6+ on capped or configured providers only", () => {
   const is = (provider: string, id: string, extra: string[] = []) =>
-    isTarget(model({ provider, id }), extra);
+    isTarget(model({ provider, id }), new Map(extra.map((p) => [p, 1])));
 
   for (const provider of ["openai", "openai-codex"]) {
     for (const id of [
@@ -103,7 +104,9 @@ test("enabling raises the window, resetting restores the real built-in", () => {
     contextWindow: 400_000,
   });
 
-  assert.ok(longContext.enable(alreadyRaisedInUserModelsJson));
+  assert.ok(
+    longContext.enable(alreadyRaisedInUserModelsJson, MAX_CONTEXT_WINDOW),
+  );
   assert.equal(alreadyRaisedInUserModelsJson.contextWindow, MAX_CONTEXT_WINDOW);
   assert.equal(longContext.armedModel, alreadyRaisedInUserModelsJson);
 
@@ -118,9 +121,9 @@ test("only one model is armed at a time", () => {
   const sol = model({ provider: "openai", id: "gpt-5.6-sol" });
   const terra = model({ provider: "openai", id: "gpt-5.6-terra" });
 
-  assert.ok(longContext.enable(sol));
+  assert.ok(longContext.enable(sol, MAX_CONTEXT_WINDOW));
   assert.ok(
-    !longContext.enable(terra),
+    !longContext.enable(terra, MAX_CONTEXT_WINDOW),
     "a model switch resets first, so arming twice cannot happen",
   );
   assert.equal(terra.contextWindow, 272_000);
@@ -150,6 +153,7 @@ function extensionHarness(
   const registryModel = model({ provider: "openai", id: "gpt-5.6-sol" });
   const ctx = {
     model: registryModel,
+    modelRegistry: { isUsingOAuth: (_model: Model<Api>) => false },
     mode: "tui",
     hasUI,
     ui: {
@@ -255,7 +259,7 @@ test("automatic child activation requires an explicit config opt-in", async () =
     await commandHandler("", ctx);
     assert.equal(
       ctx.model.contextWindow,
-      872_000,
+      1_050_000,
       "manual toggle remains available without opting in",
     );
     await handlers.get("session_shutdown")?.({}, ctx);
@@ -285,6 +289,8 @@ describe("additionalProviders", () => {
     '{"additionalProviders":"openrouter"}',
     '{"additionalProviders":{"0":"openrouter"}}',
     '{"additionalProviders":[1,null,true]}',
+    '{"additionalProviders":{"openrouter":"big"}}',
+    '{"additionalProviders":{"openrouter":0}}',
   ]) {
     test(`ignores malformed config ${json}`, async () => {
       config(json);
@@ -306,8 +312,33 @@ describe("additionalProviders", () => {
 
     await commandHandler("", ctx);
 
-    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+    assert.equal(ctx.model.contextWindow, CHATGPT_CONTEXT_WINDOW);
   });
+
+  test("an object sets the window per provider", async () => {
+    config('{"additionalProviders":{"openrouter":1050000}}');
+    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+    ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
+    await handlers.get("session_start")?.({}, ctx);
+
+    await commandHandler("", ctx);
+
+    assert.equal(ctx.model.contextWindow, 1_050_000);
+  });
+});
+
+test("openai gets 872K with ChatGPT sign-in and 1.05M with an API key", async () => {
+  for (const [usingOAuth, expected] of [
+    [true, CHATGPT_CONTEXT_WINDOW],
+    [false, MAX_CONTEXT_WINDOW],
+  ] as const) {
+    const { ctx, commandHandler } = extensionHarness(undefined);
+    ctx.modelRegistry.isUsingOAuth = () => usingOAuth;
+
+    await commandHandler("", ctx);
+
+    assert.equal(ctx.model.contextWindow, expected);
+  }
 });
 
 test("only PI_SUBAGENT_CHILD=1 counts as a runner child", async () => {
@@ -337,7 +368,7 @@ test("only PI_SUBAGENT_CHILD=1 counts as a runner child", async () => {
       const enabled = marker === "1";
       assert.equal(
         ctx.model.contextWindow,
-        enabled ? 872_000 : 400_000,
+        enabled ? CHATGPT_CONTEXT_WINDOW : 400_000,
         `${marker}: ${provider}/${id}`,
       );
       assert.equal(
@@ -804,7 +835,7 @@ test("nested foreground sessions with an explicit extension inherit the runner o
   const parent = await createChildSession();
   const nested = await createChildSession();
   for (const session of [parent, nested]) {
-    assert.equal(session.model?.contextWindow, 872_000);
+    assert.equal(session.model?.contextWindow, 1_050_000);
     assert.equal(session.model?.provider, "openai");
     assert.equal(session.model?.id, "gpt-5.6-sol");
     assert.equal(session.thinkingLevel, "high");
@@ -813,7 +844,7 @@ test("nested foreground sessions with an explicit extension inherit the runner o
   assert.notEqual(parent.model, nested.model);
   await nested.prompt("/long-context");
   assert.equal(nested.model?.contextWindow, 272_000);
-  assert.equal(parent.model?.contextWindow, 872_000);
+  assert.equal(parent.model?.contextWindow, 1_050_000);
 });
 
 test("the menu shows long context for GPT-6 and hides it for unsupported models", async () => {
@@ -912,7 +943,7 @@ test("repeated session starts install one menu filter and preserve autocomplete 
   }
 });
 
-test("GPT-6 toggles to 872K and restores its previous window on toggle, switch, and shutdown", async () => {
+test("GPT-6 toggles to 872K on Codex and restores its previous window on toggle, switch, and shutdown", async () => {
   const { commandHandler, ctx, handlers, statuses } =
     extensionHarness(undefined);
   const astra = model({
@@ -925,7 +956,7 @@ test("GPT-6 toggles to 872K and restores its previous window on toggle, switch, 
   for (const event of [undefined, "model_select", "session_shutdown"]) {
     await commandHandler("", ctx);
     const raised = ctx.model;
-    assert.equal(raised.contextWindow, 872_000);
+    assert.equal(raised.contextWindow, CHATGPT_CONTEXT_WINDOW);
     assert.equal(statuses.at(-1), "⚠");
     if (event) await handlers.get(event)?.({}, ctx);
     else await commandHandler("", ctx);

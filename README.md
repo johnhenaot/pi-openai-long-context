@@ -1,6 +1,6 @@
 # pi-openai-long-context
 
-Raise GPT-5.6+ models from pi's **272K** context window to **872K**.
+Raise GPT-5.6+ models from pi's **272K** context window to **872K** with ChatGPT sign-in, or **1.05M** with an OpenAI API key.
 
 It is off until you ask for it, because [it costs more](#what-it-costs).
 
@@ -58,17 +58,17 @@ Past 272K input tokens, OpenAI bills the **whole request** at its long-context r
 
 Any GPT model from 5.6 onward — `gpt-5.6-*`, `gpt-6-*`, `gpt-6.1-*`, and later versions (including namespaced IDs such as `openai/gpt-5.6-*`) — on the `openai` and `openai-codex` providers. Other providers can be explicitly enabled with `additionalProviders` in `openai-long-context.json`; providers not listed there are left untouched.
 
-To use an equivalent model through another provider, add its provider name to `~/.pi/agent/openai-long-context.json`:
+To use an equivalent model through another provider, add it to `~/.pi/agent/openai-long-context.json`. A list gives each provider 872K; an object sets the window per provider:
 
 ```json
 {
-  "additionalProviders": ["openrouter"]
+  "additionalProviders": { "openrouter": 1050000 }
 }
 ```
 
-This applies to manual toggles, the command menu, and sessions opted in with either auto-enable flag. Only add providers whose GPT-5.6+ model documents a context window of at least 872K tokens.
+This applies to manual toggles, the command menu, and sessions opted in with either auto-enable flag. Entries without a positive whole number are ignored. `openai` and `openai-codex` always use their own limits.
 
-872K is the Codex maximum for every GPT-5.6+ model OpenAI lists (the API allows 1.05M): GPT-5.6 Sol/Terra/Luna, GPT-6 Sol/Luna/[Astra](https://developers.openai.com/api/docs/models/gpt-6-astra), and [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol). Newer versions match automatically without a per-model check.
+`openai-codex`, and `openai` signed in with ChatGPT, get 872K, the Codex maximum. `openai` with an API key gets 1.05M, the API maximum. If you switch logins mid-session, run `/long-context` off and on to pick up the new limit.
 
 If you set your own context window for a supported model in `models.json`, turning this off restores *your* value, not pi's.
 
