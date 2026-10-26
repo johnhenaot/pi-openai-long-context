@@ -8,19 +8,17 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-// API keys get the API maximum; ChatGPT sign-in gets the Codex maximum.
-export const MAX_CONTEXT_WINDOW = 1_050_000;
-export const CHATGPT_CONTEXT_WINDOW = 872_000;
+export const API_MAX_CONTEXT_WINDOW = 1_050_000;
+export const OAUTH_MAX_CONTEXT_WINDOW = 872_000;
 
 export const COMMAND_NAME = "long-context";
 
 const KEEP_LONG_CONTEXT = "Keep long context";
 
-// GPT-5.6 and later.
-const GPT_VERSION = /^(?:[^/]+\/)?gpt-(\d+)(?:\.(\d+))?(?:-|$)/;
+const GPT_VERSION_EXTRACTOR_REGEX = /^(?:[^/]+\/)?gpt-(\d+)(?:\.(\d+))?(?:-|$)/;
 
 function isSupportedModelId(id: string): boolean {
-  const [, major, minor = "0"] = GPT_VERSION.exec(id) ?? [];
+  const [, major, minor = "0"] = GPT_VERSION_EXTRACTOR_REGEX.exec(id) ?? [];
   return +major > 5 || (+major === 5 && +minor >= 6);
 }
 
@@ -82,14 +80,16 @@ async function readConfig(): Promise<LongContextConfig> {
   }
 }
 
-// A legacy list gets the ChatGPT window; an object sets one per provider.
+function parseLegacyProviderList(providers: unknown[]): Map<string, number> {
+  return new Map(
+    providers
+      .filter((provider): provider is string => typeof provider === "string")
+      .map((provider) => [provider, OAUTH_MAX_CONTEXT_WINDOW]),
+  );
+}
+
 function parseAdditionalProviders(value: unknown): Map<string, number> {
-  if (Array.isArray(value))
-    return new Map(
-      value
-        .filter((provider): provider is string => typeof provider === "string")
-        .map((provider) => [provider, CHATGPT_CONTEXT_WINDOW]),
-    );
+  if (Array.isArray(value)) return parseLegacyProviderList(value);
   if (value === null || typeof value !== "object") return new Map();
   return new Map(
     Object.entries(value).filter(
@@ -111,9 +111,9 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
 
   const targetWindow = (model: Model<Api>, ctx: ExtensionContext): number => {
     if (model.provider === "openai" && !ctx.modelRegistry.isUsingOAuth(model))
-      return MAX_CONTEXT_WINDOW;
-    if (CAPPED_PROVIDERS.has(model.provider)) return CHATGPT_CONTEXT_WINDOW;
-    return additionalProviders.get(model.provider) ?? CHATGPT_CONTEXT_WINDOW;
+      return API_MAX_CONTEXT_WINDOW;
+    if (CAPPED_PROVIDERS.has(model.provider)) return OAUTH_MAX_CONTEXT_WINDOW;
+    return additionalProviders.get(model.provider) ?? OAUTH_MAX_CONTEXT_WINDOW;
   };
 
   const setMarker = (ui: ExtensionUIContext, on: boolean): void => {
