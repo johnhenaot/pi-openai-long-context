@@ -318,15 +318,23 @@ describe("additionalProviders", () => {
     assert.equal(ctx.model.contextWindow, OAUTH_MAX_CONTEXT_WINDOW);
   });
 
-  test("an object sets the window per provider", async () => {
-    config('{"additionalProviders":{"openrouter":1050000}}');
-    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
-    ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
-    await handlers.get("session_start")?.({}, ctx);
+  test("an object sets the window per provider, but not for built-ins", async () => {
+    config(
+      '{"additionalProviders":{"openrouter":500000,"azure":600000,"openai-codex":1050000}}',
+    );
+    for (const [provider, expected] of [
+      ["openrouter", 500_000],
+      ["azure", 600_000],
+      ["openai-codex", OAUTH_MAX_CONTEXT_WINDOW],
+    ] as const) {
+      const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+      ctx.model = model({ provider, id: "gpt-6-astra" });
+      await handlers.get("session_start")?.({}, ctx);
 
-    await commandHandler("", ctx);
+      await commandHandler("", ctx);
 
-    assert.equal(ctx.model.contextWindow, 1_050_000);
+      assert.equal(ctx.model.contextWindow, expected, provider);
+    }
   });
 });
 
