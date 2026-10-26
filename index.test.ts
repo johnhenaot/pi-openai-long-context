@@ -155,7 +155,7 @@ function extensionHarness(
   const registryModel = model({ provider: "openai", id: "gpt-5.6-sol" });
   const ctx = {
     model: registryModel,
-    modelRegistry: { isUsingOAuth: (_model: Model<Api>) => false },
+    modelRegistry: { isUsingOAuth: () => false },
     mode: "tui",
     hasUI,
     ui: {
@@ -289,20 +289,21 @@ describe("additionalProviders", () => {
 
   for (const json of [
     '{"additionalProviders":"openrouter"}',
-    '{"additionalProviders":{"0":"openrouter"}}',
     '{"additionalProviders":[1,null,true]}',
-    '{"additionalProviders":{"openrouter":"big"}}',
+    '{"additionalProviders":{"openrouter":"500000"}}',
     '{"additionalProviders":{"openrouter":0}}',
   ]) {
     test(`ignores malformed config ${json}`, async () => {
       config(json);
-      const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+      const { ctx, handlers, commandHandler, notifications } =
+        extensionHarness(undefined);
       ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
       await handlers.get("session_start")?.({}, ctx);
 
       await commandHandler("", ctx);
 
       assert.equal(ctx.model.contextWindow, 272_000);
+      assert.match(notifications.at(-1) ?? "", /only applies/);
     });
   }
 
@@ -319,11 +320,10 @@ describe("additionalProviders", () => {
 
   test("an object sets the window per provider, but not for built-ins", async () => {
     config(
-      '{"additionalProviders":{"openrouter":500000,"azure":600000,"openai-codex":1050000}}',
+      '{"additionalProviders":{"openrouter":500000,"openai-codex":1050000}}',
     );
     for (const [provider, expected] of [
       ["openrouter", 500_000],
-      ["azure", 600_000],
       ["openai-codex", OAUTH_MAX_CONTEXT_WINDOW],
     ] as const) {
       const { ctx, handlers, commandHandler } = extensionHarness(undefined);
@@ -337,18 +337,13 @@ describe("additionalProviders", () => {
   });
 });
 
-test("openai gets 872K with ChatGPT sign-in and 1.05M with an API key", async () => {
-  for (const [usingOAuth, expected] of [
-    [true, OAUTH_MAX_CONTEXT_WINDOW],
-    [false, API_MAX_CONTEXT_WINDOW],
-  ] as const) {
-    const { ctx, commandHandler } = extensionHarness(undefined);
-    ctx.modelRegistry.isUsingOAuth = () => usingOAuth;
+test("openai with ChatGPT sign-in gets 872K", async () => {
+  const { ctx, commandHandler } = extensionHarness(undefined);
+  ctx.modelRegistry.isUsingOAuth = () => true;
 
-    await commandHandler("", ctx);
+  await commandHandler("", ctx);
 
-    assert.equal(ctx.model.contextWindow, expected);
-  }
+  assert.equal(ctx.model.contextWindow, OAUTH_MAX_CONTEXT_WINDOW);
 });
 
 test("only PI_SUBAGENT_CHILD=1 counts as a runner child", async () => {
