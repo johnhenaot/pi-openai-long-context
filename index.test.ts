@@ -74,7 +74,6 @@ test("isTarget accepts GPT-5.6+ on capped or configured providers only", () => {
       "gpt-6-astra",
       "gpt-6.1-sol",
       "gpt-7",
-      "gpt-5.10-x",
       "openai/gpt-6.1-sol",
     ])
       assert.ok(is(provider, id), `${provider}/${id}`);

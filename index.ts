@@ -15,11 +15,10 @@ export const COMMAND_NAME = "long-context";
 
 const KEEP_LONG_CONTEXT = "Keep long context";
 
-const GPT_VERSION_EXTRACTOR_REGEX = /^(?:[^/]+\/)?gpt-(\d+)(?:\.(\d+))?(?:-|$)/;
+const GPT_VERSION_EXTRACTOR_REGEX = /^(?:[^/]+\/)?gpt-(\d+(?:\.\d+)?)(?:-|$)/;
 
 function isSupportedModelId(id: string): boolean {
-  const [, major, minor = "0"] = GPT_VERSION_EXTRACTOR_REGEX.exec(id) ?? [];
-  return +major > 5 || (+major === 5 && +minor >= 6);
+  return Number(GPT_VERSION_EXTRACTOR_REGEX.exec(id)?.[1]) >= 5.6;
 }
 
 const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
