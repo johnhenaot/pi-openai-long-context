@@ -22,9 +22,10 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import openaiLongContext, {
+  API_MAX_CONTEXT_WINDOW,
   createLongContext,
   isTarget,
-  MAX_CONTEXT_WINDOW,
+  OAUTH_MAX_CONTEXT_WINDOW,
 } from "./index.ts";
 
 let previousAgentDir: string | undefined;
@@ -65,7 +66,7 @@ function model(
 
 test("isTarget accepts GPT-5.6+ on capped or configured providers only", () => {
   const is = (provider: string, id: string, extra: string[] = []) =>
-    isTarget(model({ provider, id }), extra);
+    isTarget(model({ provider, id }), new Map(extra.map((p) => [p, 1])));
 
   for (const provider of ["openai", "openai-codex"]) {
     for (const id of [
@@ -73,7 +74,6 @@ test("isTarget accepts GPT-5.6+ on capped or configured providers only", () => {
       "gpt-6-astra",
       "gpt-6.1-sol",
       "gpt-7",
-      "gpt-5.10-x",
       "openai/gpt-6.1-sol",
     ])
       assert.ok(is(provider, id), `${provider}/${id}`);
@@ -103,8 +103,13 @@ test("enabling raises the window, resetting restores the real built-in", () => {
     contextWindow: 400_000,
   });
 
-  assert.ok(longContext.enable(alreadyRaisedInUserModelsJson));
-  assert.equal(alreadyRaisedInUserModelsJson.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.ok(
+    longContext.enable(alreadyRaisedInUserModelsJson, API_MAX_CONTEXT_WINDOW),
+  );
+  assert.equal(
+    alreadyRaisedInUserModelsJson.contextWindow,
+    API_MAX_CONTEXT_WINDOW,
+  );
   assert.equal(longContext.armedModel, alreadyRaisedInUserModelsJson);
 
   assert.ok(longContext.reset());
@@ -118,9 +123,9 @@ test("only one model is armed at a time", () => {
   const sol = model({ provider: "openai", id: "gpt-5.6-sol" });
   const terra = model({ provider: "openai", id: "gpt-5.6-terra" });
 
-  assert.ok(longContext.enable(sol));
+  assert.ok(longContext.enable(sol, API_MAX_CONTEXT_WINDOW));
   assert.ok(
-    !longContext.enable(terra),
+    !longContext.enable(terra, API_MAX_CONTEXT_WINDOW),
     "a model switch resets first, so arming twice cannot happen",
   );
   assert.equal(terra.contextWindow, 272_000);
@@ -150,6 +155,7 @@ function extensionHarness(
   const registryModel = model({ provider: "openai", id: "gpt-5.6-sol" });
   const ctx = {
     model: registryModel,
+    modelRegistry: { isUsingOAuth: () => false },
     mode: "tui",
     hasUI,
     ui: {
@@ -283,18 +289,21 @@ describe("additionalProviders", () => {
 
   for (const json of [
     '{"additionalProviders":"openrouter"}',
-    '{"additionalProviders":{"0":"openrouter"}}',
     '{"additionalProviders":[1,null,true]}',
+    '{"additionalProviders":{"openrouter":"500000"}}',
+    '{"additionalProviders":{"openrouter":0}}',
   ]) {
     test(`ignores malformed config ${json}`, async () => {
       config(json);
-      const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+      const { ctx, handlers, commandHandler, notifications } =
+        extensionHarness(undefined);
       ctx.model = model({ provider: "openrouter", id: "gpt-6-astra" });
       await handlers.get("session_start")?.({}, ctx);
 
       await commandHandler("", ctx);
 
       assert.equal(ctx.model.contextWindow, 272_000);
+      assert.match(notifications.at(-1) ?? "", /only applies/);
     });
   }
 
@@ -306,8 +315,35 @@ describe("additionalProviders", () => {
 
     await commandHandler("", ctx);
 
-    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+    assert.equal(ctx.model.contextWindow, OAUTH_MAX_CONTEXT_WINDOW);
   });
+
+  test("an object sets the window per provider, but not for built-ins", async () => {
+    config(
+      '{"additionalProviders":{"openrouter":500000,"openai-codex":1050000}}',
+    );
+    for (const [provider, expected] of [
+      ["openrouter", 500_000],
+      ["openai-codex", OAUTH_MAX_CONTEXT_WINDOW],
+    ] as const) {
+      const { ctx, handlers, commandHandler } = extensionHarness(undefined);
+      ctx.model = model({ provider, id: "gpt-6-astra" });
+      await handlers.get("session_start")?.({}, ctx);
+
+      await commandHandler("", ctx);
+
+      assert.equal(ctx.model.contextWindow, expected, provider);
+    }
+  });
+});
+
+test("openai with ChatGPT sign-in gets 872K", async () => {
+  const { ctx, commandHandler } = extensionHarness(undefined);
+  ctx.modelRegistry.isUsingOAuth = () => true;
+
+  await commandHandler("", ctx);
+
+  assert.equal(ctx.model.contextWindow, OAUTH_MAX_CONTEXT_WINDOW);
 });
 
 test("only PI_SUBAGENT_CHILD=1 counts as a runner child", async () => {
@@ -337,7 +373,7 @@ test("only PI_SUBAGENT_CHILD=1 counts as a runner child", async () => {
       const enabled = marker === "1";
       assert.equal(
         ctx.model.contextWindow,
-        enabled ? 1_050_000 : 400_000,
+        enabled ? OAUTH_MAX_CONTEXT_WINDOW : 400_000,
         `${marker}: ${provider}/${id}`,
       );
       assert.equal(
@@ -384,7 +420,7 @@ test("opting in by default arms at startup and follows model switches", async ()
     extensionHarness(undefined);
 
   await handlers.get("session_start")?.({}, ctx);
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
   assert.notEqual(
     ctx.model,
     registryModel,
@@ -395,7 +431,7 @@ test("opting in by default arms at startup and follows model switches", async ()
   const armedSol = ctx.model;
   await handlers.get("session_start")?.({}, ctx);
   assert.equal(ctx.model, armedSol, "a repeated start keeps the armed copy");
-  assert.equal(armedSol.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(armedSol.contextWindow, API_MAX_CONTEXT_WINDOW);
 
   const claude = model({
     provider: "anthropic",
@@ -413,7 +449,7 @@ test("opting in by default arms at startup and follows model switches", async ()
   await handlers.get("model_select")?.({}, ctx);
   assert.equal(
     ctx.model.contextWindow,
-    MAX_CONTEXT_WINDOW,
+    API_MAX_CONTEXT_WINDOW,
     "switching back to a supported model re-arms",
   );
   assert.equal(registryModel.contextWindow, 272_000);
@@ -423,7 +459,7 @@ test("opting in by default arms at startup and follows model switches", async ()
   ctx.model = terra;
   await handlers.get("model_select")?.({}, ctx);
   assert.equal(armedAgain.contextWindow, 272_000, "release the old copy");
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
   assert.notEqual(ctx.model, terra, "a fresh copy per supported model");
   assert.equal(terra.contextWindow, 272_000);
 
@@ -448,13 +484,13 @@ test("re-selecting the current model re-arms instead of orphaning the copy", asy
 
   await handlers.get("session_start")?.({}, ctx);
   const orphaned = ctx.model;
-  assert.equal(orphaned.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(orphaned.contextWindow, API_MAX_CONTEXT_WINDOW);
 
   ctx.model = registryModel;
   await handlers.get("input")?.({ streamingBehavior: "steer" }, ctx);
   assert.equal(
     orphaned.contextWindow,
-    MAX_CONTEXT_WINDOW,
+    API_MAX_CONTEXT_WINDOW,
     "mid-stream input leaves the running turn alone",
   );
   assert.equal(ctx.model, registryModel);
@@ -462,7 +498,7 @@ test("re-selecting the current model re-arms instead of orphaning the copy", asy
   await handlers.get("input")?.({}, ctx);
 
   assert.equal(orphaned.contextWindow, 272_000, "release the orphaned copy");
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
   assert.notEqual(ctx.model, registryModel);
   assert.equal(registryModel.contextWindow, 272_000);
   assert.equal(statuses.at(-1), "⚠");
@@ -479,12 +515,12 @@ test("re-selecting the current model re-arms instead of orphaning the copy", asy
 
   const healed = ctx.model;
   await handlers.get("model_select")?.({}, ctx);
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
   ctx.model = healed;
   await handlers.get("before_agent_start")?.({}, ctx);
   assert.equal(
     ctx.model.contextWindow,
-    MAX_CONTEXT_WINDOW,
+    API_MAX_CONTEXT_WINDOW,
     "before_agent_start repairs turns that do not come from input",
   );
   assert.notEqual(ctx.model, healed);
@@ -529,7 +565,7 @@ test("a model switch during the raise wins, and that model is armed instead", as
     terra,
     "the switched-to model is armed on a copy",
   );
-  assert.equal(switchedToTerra.ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(switchedToTerra.ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
   assert.equal(terra.contextWindow, 272_000);
 });
 
@@ -592,7 +628,7 @@ test("toggling again while the raise is still in flight turns it off", async () 
   await commandHandler("", ctx);
   assert.equal(
     ctx.model.contextWindow,
-    MAX_CONTEXT_WINDOW,
+    API_MAX_CONTEXT_WINDOW,
     "a clean toggle still works after",
   );
 });
@@ -616,7 +652,7 @@ test("failed and thrown model selections leave a later manual raise available", 
     else await commandHandler("", ctx);
     assert.equal(ctx.model, registryModel);
     await commandHandler("", ctx);
-    assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW, failure);
+    assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW, failure);
   }
 });
 
@@ -646,7 +682,7 @@ test("an automatic compaction repairs a detached copy and is cancelled", async (
 
   assert.deepEqual(automatic, { cancel: true });
   assert.equal(detached.contextWindow, 272_000);
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
   assert.equal(registryModel.contextWindow, 272_000);
   assert.equal(statuses.at(-1), "⚠");
 });
@@ -669,7 +705,7 @@ test("an overflow compaction that continues a turn is repaired but never cancell
 
   assert.equal(result, undefined, "cancelling would drop the interrupted turn");
   assert.equal(detached.contextWindow, 272_000);
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
   assert.equal(registryModel.contextWindow, 272_000);
 });
 
@@ -689,7 +725,7 @@ test("an overflow compaction with no retry is cancelled like any other", async (
   );
 
   assert.deepEqual(result, { cancel: true });
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
 });
 
 test("the two opt-ins are independent: each covers only its own sessions", async () => {
@@ -716,7 +752,7 @@ test("the two opt-ins are independent: each covers only its own sessions", async
       const label = `${contents} in a ${child ? "child" : "main"} session`;
       assert.equal(
         ctx.model.contextWindow,
-        armed ? MAX_CONTEXT_WINDOW : 272_000,
+        armed ? API_MAX_CONTEXT_WINDOW : 272_000,
         label,
       );
       assert.equal(ctx.model !== registryModel, armed, label);
@@ -912,7 +948,7 @@ test("repeated session starts install one menu filter and preserve autocomplete 
   }
 });
 
-test("GPT-6 toggles to 1.05M and restores its previous window on toggle, switch, and shutdown", async () => {
+test("GPT-6 toggles to 872K on Codex and restores its previous window on toggle, switch, and shutdown", async () => {
   const { commandHandler, ctx, handlers, statuses } =
     extensionHarness(undefined);
   const astra = model({
@@ -925,7 +961,7 @@ test("GPT-6 toggles to 1.05M and restores its previous window on toggle, switch,
   for (const event of [undefined, "model_select", "session_shutdown"]) {
     await commandHandler("", ctx);
     const raised = ctx.model;
-    assert.equal(raised.contextWindow, 1_050_000);
+    assert.equal(raised.contextWindow, OAUTH_MAX_CONTEXT_WINDOW);
     assert.equal(statuses.at(-1), "⚠");
     if (event) await handlers.get(event)?.({}, ctx);
     else await commandHandler("", ctx);
@@ -961,7 +997,7 @@ test("keeping long context cancels compaction caused by turning it off", async (
   );
 
   assert.deepEqual(result, { cancel: true });
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
   assert.equal(registryModel.contextWindow, 272_000);
   assert.equal(statuses.at(-1), "⚠");
 });
@@ -1026,7 +1062,7 @@ test("re-enabling long context clears the pending compaction warning", async () 
   await commandHandler("", ctx);
   await commandHandler("", ctx);
   await commandHandler("", ctx);
-  assert.equal(ctx.model.contextWindow, MAX_CONTEXT_WINDOW);
+  assert.equal(ctx.model.contextWindow, API_MAX_CONTEXT_WINDOW);
 
   const result = await handlers.get("session_before_compact")?.(
     { reason: "threshold" },

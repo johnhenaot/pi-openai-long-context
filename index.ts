@@ -8,30 +8,29 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export const MAX_CONTEXT_WINDOW = 1_050_000;
+export const API_MAX_CONTEXT_WINDOW = 1_050_000;
+export const OAUTH_MAX_CONTEXT_WINDOW = 872_000;
 
 export const COMMAND_NAME = "long-context";
 
 const KEEP_LONG_CONTEXT = "Keep long context";
 
-// GPT-5.6 and later; every such model OpenAI documents is 1.05M.
-const GPT_VERSION = /^(?:[^/]+\/)?gpt-(\d+)(?:\.(\d+))?(?:-|$)/;
+const GPT_VERSION_EXTRACTOR_REGEX = /^(?:[^/]+\/)?gpt-(\d+(?:\.\d+)?)(?:-|$)/;
 
 function isSupportedModelId(id: string): boolean {
-  const [, major, minor = "0"] = GPT_VERSION.exec(id) ?? [];
-  return +major > 5 || (+major === 5 && +minor >= 6);
+  return Number(GPT_VERSION_EXTRACTOR_REGEX.exec(id)?.[1]) >= 5.6;
 }
 
 const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
 
 export function isTarget(
   model: Model<Api> | undefined,
-  additionalProviders: readonly string[] = [],
+  additionalProviders: ReadonlyMap<string, number> = new Map(),
 ): model is Model<Api> {
   return (
     model !== undefined &&
     (CAPPED_PROVIDERS.has(model.provider) ||
-      additionalProviders.includes(model.provider)) &&
+      additionalProviders.has(model.provider)) &&
     isSupportedModelId(model.id)
   );
 }
@@ -44,11 +43,11 @@ export function createLongContext() {
       return armed?.model;
     },
 
-    enable(model: Model<Api>): boolean {
+    enable(model: Model<Api>, contextWindow: number): boolean {
       if (armed !== undefined) return false;
 
       armed = { model, previousContextWindow: model.contextWindow };
-      model.contextWindow = Math.max(model.contextWindow, MAX_CONTEXT_WINDOW);
+      model.contextWindow = Math.max(model.contextWindow, contextWindow);
       return true;
     },
 
@@ -80,8 +79,27 @@ async function readConfig(): Promise<LongContextConfig> {
   }
 }
 
+function parseLegacyProviderList(providers: unknown[]): Map<string, number> {
+  return new Map(
+    providers
+      .filter((provider): provider is string => typeof provider === "string")
+      .map((provider) => [provider, OAUTH_MAX_CONTEXT_WINDOW]),
+  );
+}
+
+function parseAdditionalProviders(value: unknown): Map<string, number> {
+  if (Array.isArray(value)) return parseLegacyProviderList(value);
+  if (value === null || typeof value !== "object") return new Map();
+  return new Map(
+    Object.entries(value).filter(
+      (entry): entry is [string, number] =>
+        Number.isSafeInteger(entry[1]) && (entry[1] as number) > 0,
+    ),
+  );
+}
+
 export default function openaiLongContext(pi: ExtensionAPI): void {
-  let additionalProviders: string[] = [];
+  let additionalProviders = new Map<string, number>();
   const longContext = createLongContext();
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
@@ -89,6 +107,13 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   let modelBeingSet: Model<Api> | undefined;
   let raiseInterruptedBy: Model<Api> | undefined;
   let raiseCancelled = false;
+
+  const targetWindow = (model: Model<Api>, ctx: ExtensionContext): number => {
+    if (model.provider === "openai" && !ctx.modelRegistry.isUsingOAuth(model))
+      return API_MAX_CONTEXT_WINDOW;
+    if (CAPPED_PROVIDERS.has(model.provider)) return OAUTH_MAX_CONTEXT_WINDOW;
+    return additionalProviders.get(model.provider) ?? OAUTH_MAX_CONTEXT_WINDOW;
+  };
 
   const setMarker = (ui: ExtensionUIContext, on: boolean): void => {
     ui.setStatus(COMMAND_NAME, on ? ui.theme.fg("warning", "⚠") : undefined);
@@ -125,7 +150,8 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       interrupted = modelBeingSet !== privateCopy || raiseCancelled;
       if (interrupted) return undefined;
       pi.setThinkingLevel(requestedThinkingLevel);
-      if (!longContext.enable(privateCopy)) return undefined;
+      if (!longContext.enable(privateCopy, targetWindow(privateCopy, ctx)))
+        return undefined;
       setMarker(ctx.ui, true);
       return privateCopy;
     } finally {
@@ -156,11 +182,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     const config = await readConfig();
-    additionalProviders = Array.isArray(config.additionalProviders)
-      ? config.additionalProviders.filter(
-          (provider): provider is string => typeof provider === "string",
-        )
-      : [];
+    additionalProviders = parseAdditionalProviders(config.additionalProviders);
     if (!hiddenFromMenu && ctx.mode === "tui") {
       hiddenFromMenu = true;
       ctx.ui.addAutocompleteProvider((current) => ({
@@ -236,7 +258,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand(COMMAND_NAME, {
-    description: `Raise the GPT-5.6+ context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
+    description: "Raise the GPT-5.6+ context window for this model",
     handler: async (_args, ctx) => {
       if (modelBeingSet !== undefined) {
         raiseCancelled = true;
