@@ -8,50 +8,13 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export const MAX_CONTEXT_WINDOW = 1_050_000;
+export const MAX_CONTEXT_WINDOW = 872_000;
 
 export const COMMAND_NAME = "long-context";
 
 const KEEP_LONG_CONTEXT = "Keep long context";
 
-// Snapshot reported by https://github.com/earendil-works/pi/pull/11173.
-// Keep Codex limits model-specific: this is not an API or future-model guarantee.
-const CODEX_CONTEXT_WINDOWS = new Map([
-  ["gpt-5.6-sol", 872_000],
-  ["gpt-5.6-terra", 872_000],
-  ["gpt-5.6-luna", 872_000],
-  ["gpt-6-sol", 872_000],
-  ["gpt-6-luna", 872_000],
-  ["gpt-6-astra", 872_000],
-  ["gpt-6.1-sol", 872_000],
-]);
-
-export function contextWindowFor(
-  model: Model<Api>,
-  overrides?: unknown,
-): number | undefined {
-  const key = `${model.provider}/${model.id}`;
-  if (
-    overrides &&
-    typeof overrides === "object" &&
-    !Array.isArray(overrides) &&
-    Object.hasOwn(overrides, key)
-  ) {
-    const value = (overrides as Record<string, unknown>)[key];
-    if (typeof value === "number" && Number.isSafeInteger(value) && value > 0)
-      return value;
-  }
-  if (
-    model.provider === "openai-codex" ||
-    model.provider.startsWith("openai-codex@") ||
-    model.api === "openai-codex-responses"
-  ) {
-    return CODEX_CONTEXT_WINDOWS.get(model.id.replace(/^[^/]+\//, ""));
-  }
-  return MAX_CONTEXT_WINDOW;
-}
-
-// Preserve the existing GPT-5.6+ eligibility rule.
+// GPT-5.6 and later. The API allows 1.05M, but Codex caps these models at 872K.
 const GPT_VERSION = /^(?:[^/]+\/)?gpt-(\d+)(?:\.(\d+))?(?:-|$)/;
 
 function isSupportedModelId(id: string): boolean {
@@ -64,14 +27,12 @@ const CAPPED_PROVIDERS = new Set(["openai", "openai-codex"]);
 export function isTarget(
   model: Model<Api> | undefined,
   additionalProviders: readonly string[] = [],
-  contextWindows?: unknown,
 ): model is Model<Api> {
   return (
     model !== undefined &&
     (CAPPED_PROVIDERS.has(model.provider) ||
       additionalProviders.includes(model.provider)) &&
-    isSupportedModelId(model.id) &&
-    contextWindowFor(model, contextWindows) !== undefined
+    isSupportedModelId(model.id)
   );
 }
 
@@ -83,14 +44,11 @@ export function createLongContext() {
       return armed?.model;
     },
 
-    enable(
-      model: Model<Api>,
-      contextWindow = contextWindowFor(model),
-    ): boolean {
-      if (armed !== undefined || contextWindow === undefined) return false;
+    enable(model: Model<Api>): boolean {
+      if (armed !== undefined) return false;
 
       armed = { model, previousContextWindow: model.contextWindow };
-      model.contextWindow = Math.max(model.contextWindow, contextWindow);
+      model.contextWindow = Math.max(model.contextWindow, MAX_CONTEXT_WINDOW);
       return true;
     },
 
@@ -108,7 +66,6 @@ type LongContextConfig = {
   autoEnable?: boolean;
   autoEnableSubagents?: boolean;
   additionalProviders?: unknown;
-  contextWindows?: unknown;
 };
 
 async function readConfig(): Promise<LongContextConfig> {
@@ -125,7 +82,6 @@ async function readConfig(): Promise<LongContextConfig> {
 
 export default function openaiLongContext(pi: ExtensionAPI): void {
   let additionalProviders: string[] = [];
-  let contextWindows: unknown;
   const longContext = createLongContext();
   let hiddenFromMenu = false;
   let warnBeforeAutoCompaction: Model<Api> | undefined;
@@ -149,7 +105,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   ): Promise<Model<Api> | undefined> => {
     if (
       modelBeingSet !== undefined ||
-      !isTarget(ctx.model, additionalProviders, contextWindows)
+      !isTarget(ctx.model, additionalProviders)
     )
       return undefined;
 
@@ -169,13 +125,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       interrupted = modelBeingSet !== privateCopy || raiseCancelled;
       if (interrupted) return undefined;
       pi.setThinkingLevel(requestedThinkingLevel);
-      if (
-        !longContext.enable(
-          privateCopy,
-          contextWindowFor(privateCopy, contextWindows),
-        )
-      )
-        return undefined;
+      if (!longContext.enable(privateCopy)) return undefined;
       setMarker(ctx.ui, true);
       return privateCopy;
     } finally {
@@ -206,7 +156,6 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     const config = await readConfig();
-    contextWindows = config.contextWindows;
     additionalProviders = Array.isArray(config.additionalProviders)
       ? config.additionalProviders.filter(
           (provider): provider is string => typeof provider === "string",
@@ -223,10 +172,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
             cursorCol,
             options,
           );
-          if (
-            suggestions === null ||
-            isTarget(ctx.model, additionalProviders, contextWindows)
-          )
+          if (suggestions === null || isTarget(ctx.model, additionalProviders))
             return suggestions;
 
           const items = suggestions.items.filter(
@@ -290,8 +236,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand(COMMAND_NAME, {
-    description:
-      "Raise the GPT-5.6+ context window using this provider/model’s long-context limit",
+    description: `Raise the GPT-5.6+ context window to ${MAX_CONTEXT_WINDOW.toLocaleString("en-US")} for this model`,
     handler: async (_args, ctx) => {
       if (modelBeingSet !== undefined) {
         raiseCancelled = true;
@@ -307,7 +252,7 @@ export default function openaiLongContext(pi: ExtensionAPI): void {
       if (raiseCancelled) return;
       if (raised === undefined) {
         ctx.ui.notify(
-          `/${COMMAND_NAME} only applies to GPT-5.6+ models on openai, openai-codex, or configured additionalProviders. Switch to one with a known or configured context window first.`,
+          `/${COMMAND_NAME} only applies to GPT-5.6+ models on openai, openai-codex, or configured additionalProviders. Switch to one first.`,
           "warning",
         );
         return;

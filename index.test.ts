@@ -22,7 +22,6 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import openaiLongContext, {
-  contextWindowFor,
   createLongContext,
   isTarget,
   MAX_CONTEXT_WINDOW,
@@ -77,11 +76,7 @@ test("isTarget accepts GPT-5.6+ on capped or configured providers only", () => {
       "gpt-5.10-x",
       "openai/gpt-6.1-sol",
     ])
-      assert.equal(
-        is(provider, id),
-        provider !== "openai-codex" || !["gpt-7", "gpt-5.10-x"].includes(id),
-        `${provider}/${id}`,
-      );
+      assert.ok(is(provider, id), `${provider}/${id}`);
     for (const id of [
       "gpt-5.5",
       "gpt-5",
@@ -260,7 +255,7 @@ test("automatic child activation requires an explicit config opt-in", async () =
     await commandHandler("", ctx);
     assert.equal(
       ctx.model.contextWindow,
-      1_050_000,
+      872_000,
       "manual toggle remains available without opting in",
     );
     await handlers.get("session_shutdown")?.({}, ctx);
@@ -809,7 +804,7 @@ test("nested foreground sessions with an explicit extension inherit the runner o
   const parent = await createChildSession();
   const nested = await createChildSession();
   for (const session of [parent, nested]) {
-    assert.equal(session.model?.contextWindow, 1_050_000);
+    assert.equal(session.model?.contextWindow, 872_000);
     assert.equal(session.model?.provider, "openai");
     assert.equal(session.model?.id, "gpt-5.6-sol");
     assert.equal(session.thinkingLevel, "high");
@@ -818,7 +813,7 @@ test("nested foreground sessions with an explicit extension inherit the runner o
   assert.notEqual(parent.model, nested.model);
   await nested.prompt("/long-context");
   assert.equal(nested.model?.contextWindow, 272_000);
-  assert.equal(parent.model?.contextWindow, 1_050_000);
+  assert.equal(parent.model?.contextWindow, 872_000);
 });
 
 test("the menu shows long context for GPT-6 and hides it for unsupported models", async () => {
@@ -917,7 +912,7 @@ test("repeated session starts install one menu filter and preserve autocomplete 
   }
 });
 
-test("Codex GPT-6 toggles to 872K and restores its previous window on toggle, switch, and shutdown", async () => {
+test("GPT-6 toggles to 872K and restores its previous window on toggle, switch, and shutdown", async () => {
   const { commandHandler, ctx, handlers, statuses } =
     extensionHarness(undefined);
   const astra = model({
@@ -1059,223 +1054,4 @@ test("switching models clears the pending compaction warning", async () => {
 
   assert.equal(result, undefined);
   assert.equal(registryModel.contextWindow, 272_000);
-});
-
-test("provider/model targets separate Codex observations from API defaults", () => {
-  for (const id of [
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-6-sol",
-    "gpt-6-luna",
-    "gpt-6-astra",
-    "gpt-6.1-sol",
-  ]) {
-    assert.equal(
-      contextWindowFor(model({ provider: "openai-codex", id })),
-      872_000,
-    );
-    assert.equal(
-      contextWindowFor(model({ provider: "openai", id })),
-      1_050_000,
-    );
-  }
-  const future = model({ provider: "openai-codex", id: "gpt-7" });
-  assert.equal(contextWindowFor(future), undefined);
-  assert.ok(!isTarget(future));
-  assert.ok(isTarget(future, [], { "openai-codex/gpt-7": 900_000 }));
-  assert.equal(
-    contextWindowFor(model({ provider: "openai", id: "gpt-7" })),
-    1_050_000,
-  );
-});
-
-test("overrides are exact positive safe integers and malformed values use defaults", () => {
-  const codex = model({ provider: "openai-codex", id: "gpt-6.1-sol" });
-  for (const value of [
-    0,
-    -1,
-    1.5,
-    "900000",
-    null,
-    true,
-    Infinity,
-    NaN,
-    Number.MAX_SAFE_INTEGER + 1,
-  ]) {
-    assert.equal(
-      contextWindowFor(codex, { "openai-codex/gpt-6.1-sol": value }),
-      872_000,
-    );
-  }
-  for (const value of [undefined, null, [], true, "900000", 900000]) {
-    assert.equal(contextWindowFor(codex, value), 872_000);
-  }
-  assert.equal(
-    contextWindowFor(codex, { "openai-codex/gpt-6.1-sol": 900_000 }),
-    900_000,
-  );
-  assert.equal(
-    contextWindowFor(codex, { "openai/gpt-6.1-sol": 900_000 }),
-    872_000,
-  );
-  assert.equal(
-    contextWindowFor(
-      codex,
-      Object.create({ "openai-codex/gpt-6.1-sol": 900_000 }),
-    ),
-    872_000,
-  );
-});
-
-test("Codex aliases require opt-in and use Codex targets, including custom provider names", async () => {
-  for (const provider of ["openai-codex@work", "my-codex"]) {
-    const alias = model({
-      provider,
-      id: "gpt-6.1-sol",
-      api: "openai-codex-responses",
-      contextWindow: 500_000,
-    });
-    assert.ok(!isTarget(alias));
-    assert.ok(!isTarget(alias, [], { [`${provider}/gpt-6.1-sol`]: 900_000 }));
-    assert.ok(isTarget(alias, [provider]));
-    assert.equal(contextWindowFor(alias), 872_000);
-    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
-    ctx.model = alias;
-    writeFileSync(
-      join(testAgentDir, "openai-long-context.json"),
-      JSON.stringify({ additionalProviders: [provider] }),
-    );
-    await handlers.get("session_start")?.({}, ctx);
-    await commandHandler("", ctx);
-    assert.equal(ctx.model.contextWindow, 872_000);
-    await commandHandler("", ctx);
-    assert.equal(ctx.model.contextWindow, 500_000);
-  }
-});
-
-test("configured limits apply to manual, auto, and child activation and restore original windows", async () => {
-  for (const mode of ["manual", "auto", "child"]) {
-    for (const original of [272_000, 500_000, 600_000, 2_000_000]) {
-      if (mode === "child") process.env.PI_SUBAGENT_CHILD = "1";
-      else delete process.env.PI_SUBAGENT_CHILD;
-      writeFileSync(
-        join(testAgentDir, "openai-long-context.json"),
-        JSON.stringify({
-          autoEnable: mode === "auto",
-          autoEnableSubagents: mode === "child",
-          contextWindows: { "openai-codex/gpt-6.1-sol": 900_000 },
-        }),
-      );
-      const { ctx, handlers, commandHandler, notifications } =
-        extensionHarness(undefined);
-      const shared = model({
-        provider: "openai-codex",
-        id: "gpt-6.1-sol",
-        contextWindow: original,
-      });
-      ctx.model = shared;
-      await handlers.get("session_start")?.({}, ctx);
-      if (mode === "manual") await commandHandler("", ctx);
-      assert.equal(ctx.model.contextWindow, Math.max(original, 900_000));
-      assert.equal(shared.contextWindow, original);
-      assert.notEqual(ctx.model, shared);
-      if (mode === "manual")
-        assert.ok(
-          notifications
-            .at(-1)
-            ?.includes(Math.max(original, 900_000).toLocaleString("en-US")),
-        );
-      await commandHandler("", ctx);
-      assert.equal(ctx.model.contextWindow, original);
-    }
-  }
-});
-
-test("invalid configured limits fall back and unknown Codex models stay untouched", async () => {
-  for (const contextWindows of [
-    null,
-    [],
-    "bad",
-    { "openai-codex/gpt-6.1-sol": -1 },
-  ]) {
-    writeFileSync(
-      join(testAgentDir, "openai-long-context.json"),
-      JSON.stringify({ autoEnable: true, contextWindows }),
-    );
-    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
-    ctx.model = model({
-      provider: "openai-codex",
-      id: "gpt-6.1-sol",
-      contextWindow: 500_000,
-    });
-    await handlers.get("session_start")?.({}, ctx);
-    assert.equal(ctx.model.contextWindow, 872_000);
-    const future = model({
-      provider: "openai-codex",
-      id: "gpt-7",
-      contextWindow: 500_000,
-    });
-    ctx.model = future;
-    await handlers.get("model_select")?.({ model: future }, ctx);
-    await commandHandler("", ctx);
-    assert.equal(ctx.model, future);
-    assert.equal(ctx.model.contextWindow, 500_000);
-  }
-});
-
-test("a concurrent switch resolves the chosen model's configured target", async () => {
-  writeFileSync(
-    join(testAgentDir, "openai-long-context.json"),
-    JSON.stringify({
-      autoEnable: true,
-      contextWindows: { "openai-codex/gpt-6.1-sol": 910_000 },
-    }),
-  );
-  const { ctx, handlers, userSwitchesTo, registryModel } =
-    extensionHarness(undefined);
-  const codex = model({
-    provider: "openai-codex",
-    id: "gpt-6.1-sol",
-    contextWindow: 500_000,
-  });
-  userSwitchesTo(codex);
-  await handlers.get("session_start")?.({}, ctx);
-  assert.equal(ctx.model.provider, "openai-codex");
-  assert.equal(ctx.model.contextWindow, 910_000);
-  assert.equal(codex.contextWindow, 500_000);
-  assert.equal(registryModel.contextWindow, 272_000);
-});
-
-test("detached Codex copies retain their configured target during threshold and overflow compaction", async () => {
-  for (const reason of ["threshold", "overflow"]) {
-    writeFileSync(
-      join(testAgentDir, "openai-long-context.json"),
-      JSON.stringify({
-        contextWindows: { "openai-codex/gpt-6.1-sol": 910_000 },
-      }),
-    );
-    const { ctx, handlers, commandHandler } = extensionHarness(undefined);
-    const codex = model({
-      provider: "openai-codex",
-      id: "gpt-6.1-sol",
-      contextWindow: 500_000,
-    });
-    ctx.model = codex;
-    await handlers.get("session_start")?.({}, ctx);
-    await commandHandler("", ctx);
-    ctx.model = codex;
-    const result = await handlers.get("session_before_compact")?.(
-      { reason, willRetry: true },
-      ctx,
-    );
-    assert.deepEqual(
-      result,
-      reason === "overflow" ? undefined : { cancel: true },
-    );
-    assert.equal(ctx.model.contextWindow, 910_000);
-    assert.equal(codex.contextWindow, 500_000);
-    await handlers.get("session_shutdown")?.({}, ctx);
-    assert.equal(ctx.model.contextWindow, 500_000);
-  }
 });
